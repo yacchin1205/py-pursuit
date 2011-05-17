@@ -166,7 +166,8 @@ class SingleTrainer(object):
     def calculate_gradient(self, signal):
         '''Calculate a gradient from a signal.
 
-        signal: A signal to use for collecting gradient information.
+        signal: A signal to use for collecting gradient information. This signal
+          will be modified in the course of the gradient collection process.
         '''
         grad = numpy.zeros_like(self.grad)
         norm = [0] * len(grad)
@@ -192,7 +193,9 @@ class SingleTrainer(object):
     def learn(self, signal, learning_rate):
         '''Calculate and apply a gradient from the given signal.
 
-        The original signal will not be modified.
+        signal: A signal to use for collecting gradient information. This signal
+          will not be modified.
+        learning_rate: Move the codebook filters this much toward the gradients.
         '''
         self.apply_gradient(
             self.calculate_gradient(signal.copy()), learning_rate)
@@ -200,7 +203,11 @@ class SingleTrainer(object):
     def reconstruct(self, signal):
         '''Reconstruct the given signal using our pursuit codebook.
 
-        The original signal will not be modified.
+        signal: A signal to encode and then reconstruct. This signal will not
+          be modified.
+
+        Returns a numpy array with the same shape as the original signal,
+        containing reconstructed values instead of the original values.
         '''
         return self.pursuit.decode(self.pursuit.iterencode(
             signal.copy(), self.min_coeff, self.max_num_coeffs))
@@ -397,7 +404,8 @@ class MultipleTrainer(object):
     def calculate_gradient(self, signal):
         '''Calculate a gradient from a signal.
 
-        signal: A signal to use for collecting gradient information.
+        signal: A signal to use for collecting gradient information. This signal
+          will be modified in the course of the gradient collection process.
         '''
         grad = [numpy.zeros_like(g) for g in self.grad]
         norm = [0.] * len(grad)
@@ -438,7 +446,9 @@ class MultipleTrainer(object):
     def learn(self, signal, learning_rate):
         '''Calculate and apply a gradient from the given signal.
 
-        The original signal will not be modified.
+        signal: A signal to use for collecting and applying gradient data.
+          This signal will not be modified.
+        learning_rate: Move the codebook filters this much toward the gradients.
         '''
         self.apply_gradient(
             self.calculate_gradient(signal.copy()), learning_rate)
@@ -446,7 +456,11 @@ class MultipleTrainer(object):
     def reconstruct(self, signal):
         '''Reconstruct the given signal using our pursuit codebook.
 
-        The original signal will not be modified.
+        signal: A signal to encode and then reconstruct. This signal will not
+          be modified.
+
+        Returns a numpy array with the same shape as the original signal,
+        containing reconstructed values instead of the original values.
         '''
         return self.pursuit.decode(self.pursuit.iterencode(
             signal.copy(), self.min_coeff, self.max_num_coeffs), signal.shape)
