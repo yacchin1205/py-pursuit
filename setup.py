@@ -15,7 +15,7 @@ setuptools.setup(
               'sparse-coding '
               'compressed-sensing '
               'machine-learning'),
-    url='http://code.google.com/p/python-pursuit/',
+    url='http://github.com/lmjohns3/py-pursuit/',
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Science/Research',
