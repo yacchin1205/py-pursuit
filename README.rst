@@ -53,4 +53,6 @@ Again, use the setup.py script :
 
 Use pip and virtualenv for even more installation goodness !
 
+After installation, you can use the package by importing lmj.pursuit.
+
 Also, have fun !
