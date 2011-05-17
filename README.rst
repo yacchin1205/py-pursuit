@@ -12,7 +12,7 @@ Building
 
 You'll need to have the numpy headers installed to build the C module (which
 speeds up the algorithm by about a factor of 2). After you've installed those,
-just do the usual setup.py dance :
+just do the usual setup.py dance ::
 
   python setup.py build
   ln -s ../build/lib.*/lmj/_pursuit.so lmj
@@ -26,7 +26,7 @@ Testing
 
 The source distribution includes a basic test module that runs matching pursuit
 on a training sound and reports the error after encoding and decoding a test
-sound -- smaller numbers are better. Run this test with :
+sound -- smaller numbers are better. Run this test with ::
 
   python pursuit_test.py
 
@@ -47,7 +47,7 @@ pursuit_test.py. This doubles the test runtime, but produces some cool graphs.
 Installing
 ----------
 
-Again, use the setup.py script :
+Again, use the setup.py script ::
 
   python setup.py install
 
