@@ -9,7 +9,7 @@ setuptools.setup(
     author='Leif Johnson',
     author_email='leif@leifjohnson.net',
     description='A small library of matching pursuit implementations',
-    long_description=open('README').read(),
+    long_description=open('README.rst').read(),
     license='MIT',
     keywords=('matching-pursuit '
               'sparse-coding '
