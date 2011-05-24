@@ -31,7 +31,7 @@ import lmj.pursuit
 
 SAMPLE_RATE = 44100
 
-GRAPHS = False
+GRAPHS = ''
 if GRAPHS:
     import scipy.signal
     import matplotlib.pylab as plt
@@ -68,7 +68,7 @@ def rmse(a, b):
     return '\t%.1f' % (1000 * numpy.linalg.norm(a - b) / numpy.sqrt(len(a)))
 
 
-def evaluate(train, test, width, codebook=10, learning_rate=0.7, max_num_coeffs=100, l1=0., l2=0., momentum=0.):
+def evaluate(train, test, width, codebook=10, learning_rate=0.7, max_num_coeffs=100):
     print codebook, '\t', width,
 
     def plot(label):
@@ -81,7 +81,7 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.7, max_num_coeffs=
         plt.plot(train[o:o+width], 'r-', aa=True)
         plt.gca().set_yticks([])
         plt.box(False)
-        plt.savefig('/tmp/pursuit/%s-w%03d-c%03d-%05d-basis.png' % (label, width, codebook, f))
+        plt.savefig(os.path.join(GRAPHS, '%s-w%03d-c%03d-%05d-basis.png' % (label, width, codebook, f)))
         plt.clf()
 
     def plot_residual(label, a, b):
@@ -93,14 +93,13 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.7, max_num_coeffs=
         plt.plot(a[i:i+w], 'b', alpha=0.8, aa=True)
         plt.plot(b[i:i+w], 'k', alpha=0.8, aa=True)
         plt.plot((a - b)[i:i+w], 'r', alpha=0.8, aa=True)
-        plt.savefig('/tmp/pursuit/%s-w%03d-c%03d-%05d-resid.png' % (label, width, codebook, f))
+        plt.savefig(os.path.join(GRAPHS, '%s-w%03d-c%03d-%05d-resid.png' % (label, width, codebook, f)))
         plt.clf()
 
     # windowed
     f = 0
-    p = lmj.pursuit.Single(codebook, width)
-    t = lmj.pursuit.SingleTrainer(
-        p, max_num_coeffs=1, momentum=momentum, l1=l1, l2=l2)
+    p = lmj.pursuit.Codebook(codebook, width)
+    t = lmj.pursuit.CodebookTrainer(p, max_num_coeffs=1)
     for _ in range(6):
         for w in random_windows(max_num_coeffs, train, width):
             t.learn(w, learning_rate)
@@ -115,10 +114,8 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.7, max_num_coeffs=
 
     # continuous
     f = 0
-    p = lmj.pursuit.Multiple(codebook, width)
-    t = lmj.pursuit.MultipleTrainer(
-        p, max_num_coeffs=max_num_coeffs, momentum=momentum, l1=l1, l2=l2,
-        padding=0.1, grow=0.1, shrink=0.001)
+    p = lmj.pursuit.TemporalCodebook(codebook, width)
+    t = lmj.pursuit.TemporalCodebookTrainer(p, max_num_coeffs=max_num_coeffs)
     for _ in range(6):
         t.learn(train, learning_rate)
         f += 1
@@ -143,7 +140,7 @@ if __name__ == '__main__':
     a = rng.randint(0, len(train) - w)
     train = train[a:a+w]
 
-    test = read_frames(os.path.join('sounds', 'rainforest.wav'))
+    test = read_frames(os.path.join('sounds', 'lullaby.wav'))
     a = rng.randint(0, len(test) - w)
     test = test[a:a+w]
 

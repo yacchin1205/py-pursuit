@@ -1,10 +1,10 @@
 Matching Pursuit
 ================
 
-This Python package contains two variants of the matching pursuit sparse coding
-algorithm. Matching pursuit uses an overcomplete set of "basis functions" or
-"codebook filters" to greedily encode a raw signal in terms of a weighted sum of
-filters. Using gradient ascent we can also infer a likely set of filters from an
+This Python package contains some variants of the matching pursuit sparse coding
+algorithm. Matching pursuit uses a set of "basis functions" or "codebook
+filters" to greedily encode a raw signal in terms of a weighted sum of filters.
+Using gradient ascent we can also infer a likely set of filters from an
 unlabeled dataset of signals.
 
 Building
@@ -34,15 +34,16 @@ from the base directory in the source tree. On my machine, the test takes
 between 1 and 5 minutes to run to completion, but you can stop it at any time.
 
 The general takeaway is that signal reproduction tends to improve with more
-training (rows of numbers), with more codebook filters (first column), and by
-using the multiple-frame encoder instead of the single-frame encoder.
-Interestingly, the single-frame encoder does worse with larger filters (second
-column), while the multiple-frame encoder tends to do worse with smaller
-filters.
+training (successive numbers within a group), with more codebook filters (first
+column), and by using the multiple-frame (temporal) encoder instead of the
+single-frame (standard) encoder. Interestingly, the standard encoder tends to do
+worse with larger filters (second column), while the temporal encoder tends to
+do worse with smaller filters.
 
-If you have matplotlib installed, you can also generate plots of the codebook
-vectors during training (stored in /tmp/pursuit) by changing GRAPHS = True in
-pursuit_test.py. This doubles the test runtime, but produces some cool graphs.
+If you have matplotlib installed, you can also save plots of the codebook
+vectors during training by setting GRAPHS = '/tmp/pursuit' (or some other
+directory name) in pursuit_test.py. Graphing doubles the test runtime, but
+produces some pretty training artifacts.
 
 Installing
 ----------

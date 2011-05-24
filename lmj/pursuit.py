@@ -31,51 +31,61 @@ or until the maximal filter response drops below some threshold. The encoding
 thus represents a signal as a weighted sum of the filters, with many of the
 weights being zero.
 
-This module contains two implementations of matching pursuit: one for encoding
-signals consisting of a single frame of data (the Single class), and another for
-encoding signals consisting of multiple frames of data (the Multiple class).
-Each implementation also comes with a Trainer class that encapsulates the logic
-involved with basic gradient-ascent training for the codebook filters.
+This module contains three implementations of matching pursuit: one for encoding
+signals of a fixed shape using filters of the same shape (the Codebook class),
+another for encoding signals composed of frames arranged along one dimension
+(the TemporalCodebook class), and a third for encoding signals that vary in size
+along two dimensions (the SpatialCodebook class). Each implementation comes
+with an associated Trainer class that encapsulates the logic involved with basic
+gradient-ascent training for the codebook filters.
 '''
 
 import numpy
 import logging
 
 
-class Single(object):
-    '''This class encodes signals consisting of a single frame.
+try:
+    # define a backup correlation function in case the c module isn't present.
+    import scipy.signal
+    def _correlate(s, w, r):
+        r[:] = scipy.signal.correlate(s, w, 'valid')
+except ImportError:
+    logging.info('cannot import scipy.signal !')
+    def _correlate(s, w, r):
+        raise NotImplementedError
+
+
+class Codebook(object):
+    '''Matching pursuit encodes signals using a codebook of filters.
 
     The encoding process decomposes a signal recursively into a maximally
     responding filter and a residual. Formally, the encoding process takes a
-    signal s and produces a series of (index, coefficient) tuples (m_n, c_n)
+    signal x and produces a series of (index, coefficient) tuples (m_n, c_n)
     according to :
 
-      s_1 = s
-      w_n = argmax_w <s_n, w>
-      c_n = <s_n, w_n>
-      s_{n+1} = s_n - c_n * w_n
+      x_1 = x
+      w_n = argmax_w <x_n, w>
+      c_n = <x_n, w_n>
+      x_{n+1} = x_n - c_n * w_n
 
     This implementation of the algorithm is intended to encode signals of a
-    constant shape : 16x16 RGB image patches, 10ms 2-channel audio clips,
-    colors, etc.
+    constant shape, using filters of the same shape : 16x16 RGB image patches,
+    10ms 2-channel audio clips, colors, etc.
 
-    See the SingleTrainer class for code that encapsulates a simple gradient
+    See the CodebookTrainer class for code that encapsulates a simple gradient
     ascent learning process for inferring codebook filters from data.
     '''
 
-    def __init__(self, num_filters, filter_shape, dtype=float):
+    def __init__(self, num_filters, filter_shape):
         '''Initialize a new codebook of static filters.
 
         num_filters: The number of filters to build in the codebook.
         filter_shape: A tuple of integers that specifies the shape of the
           filters in the codebook.
-        dtype: The numpy data type of the filters.
         '''
-        self.dtype = dtype
         if not isinstance(filter_shape, (tuple, list)):
             filter_shape = (filter_shape, )
-        self.codebook = numpy.random.randn(
-            num_filters, *filter_shape).astype(dtype)
+        self.codebook = numpy.random.randn(num_filters, *filter_shape)
         for w in self.codebook:
             w /= numpy.linalg.norm(w)
 
@@ -123,7 +133,7 @@ class Single(object):
         '''
         return tuple(self.iterencode(signal, min_coeff, max_num_coeffs))
 
-    def decode(self, encoding):
+    def decode(self, encoding, unused_shape):
         '''Decode an encoding of a static signal.
 
         encoding: A sequence of (index, coefficient) tuples.
@@ -133,15 +143,88 @@ class Single(object):
         '''
         try:
             return sum(c * self.codebook[i] for i, c in encoding)
-        except:
+        except TypeError:
             return numpy.zeros_like(self.codebook[0])
 
+    def encode_frames(self, frames, min_coeff=0.1):
+        '''Encode a sequence of frames.
 
-class SingleTrainer(object):
-    '''Train the codebook filters in a single-frame matching pursuit encoder.
-    '''
+        frames: A (possibly infinite) sequence of data frames to encode.
+        min_coeff: Only fire for filters that exceed this threshold.
 
-    def __init__(self, pursuit, min_coeff=0., max_num_coeffs=-1, momentum=0., l1=0., l2=0.):
+        Generates a sequence of ((index, coeff), ...) tuples at the same rate as
+        the input frames. If a given input frame does not yield a filter
+        coefficient better than the minimum threshold, the encoding output for
+        that frame will be an empty tuple.
+        '''
+        # set up a circular buffer (2x the max length of a codebook vector).
+        # http://mail.scipy.org/pipermail/scipy-user/2009-February/020108.html
+        N = max(len(w) for w in self.codebook)
+        frame = self.codebook[0][0]
+        memory = numpy.zeros((2 * N, ) + frame.shape, frame.dtype)
+        m = 0
+
+        # make sure the buffer is fully pre-populated before encoding.
+        frames = iter(frames)
+        while m < N:
+            memory[m] += frames.next()
+            m += 1
+
+        for frame in frames:
+            # rotate the circular buffer from the back to the front if needed.
+            if m == 2 * N:
+                memory[:N] = memory[N:]
+                memory[N:, :] = 0.
+                m = N
+            memory[m] += frame
+            m += 1
+
+            # calculate coefficients starting at offset m - N.
+            window = memory[m - N:m]
+            coeffs = numpy.array(
+                [(window[:len(w)] * w).sum() for w in self.codebook])
+            encoding = []
+            while True:
+                index = coeffs.argmax()
+                coeff = coeffs[index]
+                if coeff < min_coeff:
+                    break
+                encoding.append((index, coeff))
+                w = self.codebook[index]
+                window[:len(w)] -= coeff * w
+            yield tuple(encoding)
+
+    def decode_frames(self, tuples):
+        '''Given a frame encoding, decode and generate frames of output signal.
+
+        tuples: A sequence of tuples generated by encode_frames(signal).
+
+        Generates a sequence of signal frames at the same rate as the input
+        (encoded) tuples.
+        '''
+        N = max(len(w) for w in self.codebook)
+        frame = self.codebook[0][0]
+        acc = numpy.zeros((2 * N, ) + frame.shape, frame.dtype)
+        m = 0
+        for tup in tuples:
+            if m == 2 * N:
+                acc[:N] = acc[N:]
+                m = N
+            yield acc[m]
+            m += 1
+            if m < N or not tup:
+                continue
+            index, coeff = tup
+            w = self.codebook[index]
+            acc[m - len(w):m] += coeff * w
+
+
+class CodebookTrainer(object):
+    '''Train the codebook filters in a matching pursuit encoder.'''
+
+    def __init__(self, pursuit,
+                 min_coeff=0., max_num_coeffs=-1,
+                 momentum=0., l1=0., l2=0.):
         '''Initialize this trainer with some learning parameters.
 
         pursuit: The matching pursuit object to train.
@@ -161,7 +244,7 @@ class SingleTrainer(object):
         self.l1 = l1
         self.l2 = l2
 
-        self.grad = numpy.zeros_like(self.pursuit.codebook)
+        self.grad = [numpy.zeros_like(w) for w in self.pursuit.codebook]
 
     def calculate_gradient(self, signal):
         '''Calculate a gradient from a signal.
@@ -183,12 +266,23 @@ class SingleTrainer(object):
         grad: A sequence of gradients to apply to the codebook filters.
         learning_rate: Move the codebook filters this much toward the gradients.
         '''
-        for w, g, sg in zip(self.pursuit.codebook, grad, self.grad):
+        for i, g in enumerate(grad):
+            w = self.pursuit.codebook[i]
             l1 = numpy.clip(w, -self.l1, self.l1)
             l2 = self.l2 * w
-            sg *= self.momentum
-            sg += (1 - self.momentum) * (g - l1 - l2)
-            w += learning_rate * sg
+            self.grad[i] *= self.momentum
+            self.grad[i] += (1 - self.momentum) * (g - l1 - l2)
+            w += learning_rate * self.grad[i]
+            self._resize(i)
+
+    def _resize(self, i):
+        '''Resize codebook vector i using some energy heuristics.
+
+        i: The index of the codebook vector to resize.
+
+        This function is a no-op for the CodebookTrainer class.
+        '''
+        return
 
     def learn(self, signal, learning_rate):
         '''Calculate and apply a gradient from the given signal.
@@ -210,65 +304,64 @@ class SingleTrainer(object):
         containing reconstructed values instead of the original values.
         '''
         return self.pursuit.decode(self.pursuit.iterencode(
-            signal.copy(), self.min_coeff, self.max_num_coeffs))
+            signal.copy(), self.min_coeff, self.max_num_coeffs), signal.shape)
 
 
-class Multiple(object):
-    '''Matching pursuit for multiple-frame signals.
+class TemporalCodebook(Codebook):
+    '''Matching pursuit for convolving filters across the first dimension.
 
-    The encoding process is recursive. Given a signal s, we calculate the inner
-    product of each codebook filter w with s, and then choose the filter w and
-    offset t that result in the largest magnitude coefficient c. We subtract
-    c * w from s[t:t+len(w)] and repeat the process with the new s. More
-    formally,
+    The encoding process is recursive. Given a signal x(t) of length T that
+    varies along dimension t, we calculate the inner product of each codebook
+    filter w(t) with x(t - o) for all 0 < o < T - len(w), and then choose the
+    filter w and offset o that result in the largest magnitude coefficient c. We
+    subtract c * w(t) from x(t - o) and repeat the process with the new x(t).
+    More formally,
 
-      s_1 = s
-      w_n, t_n = argmax_{w,t} <s_n[t], w>
-      c_n = <s_n[t_n], w_n>
-      s_{n+1} = s_n[t_n] - c_n * w_n
+      x_1(t) = x(t)
+      w_n, o_n = argmax_{w,o} <x_n(t - o), w>
+      c_n = <x_n(t - o_n), w_n>
+      x_{n+1}(t) = x_n(t - o_n) - c_n * w_n
 
-    where <a[t], b> denotes the dot product between a (starting at offset t) and
-    b. (We use the correlation function to automate the dot product calculations
-    at all offsets t.) The encoding consists of triples (w, c, t) for as many
-    time steps n as desired. Reconstruction of the signal requires the codebook
-    that was used at encoding time, plus a sequence of encoding triples: the
+    where <a(t - o), b> denotes the inner product between a at offset o and b.
+    (We use the correlation function to automate the dot product calculations at
+    all offsets o.) The encoding consists of triples (w, c, o) for as many time
+    steps n as desired. Reconstruction of the signal requires the codebook that
+    was used at encoding time, plus a sequence of encoding triples: the
     reconstructed signal is just the weighted sum of the codebook filters at the
     appropriate offsets.
 
-    Because we are processing sequences of frames of possibly variable length,
-    the codebook filters are allowed also to span different numbers of frames.
-    This makes the encoding more computationally complex, but the basic idea
-    remains the same.
+    Because we are processing signals of possibly variable length in dimension
+    t, the codebook filters are allowed also to span different numbers of frames
+    along dimension t. This makes the encoding more computationally complex, but
+    the basic idea remains the same.
 
-    This version of the algorithm is inspired by Smith and Lewicki (2006),
+    This version of the algorithm is adopted from Smith and Lewicki (2006),
     "Efficient Auditory Coding" (Nature).
     '''
 
-    def __init__(self, num_filters, filter_frames, frame_shape=(), dtype=float):
+    def __init__(self, num_filters, filter_frames, frame_shape=()):
         '''Initialize a new codebook to a set of random filters.
 
         num_filters: The number of filters to use in our codebook.
         filter_frames: The length (in frames) of filters that we will use for
-          our encoding.
+          our initial codebook.
         frame_shape: The shape of each frame of data that we will encode.
-        dtype: The data type of our filters.
         '''
-        self.dtype = dtype
-        self.codebook = [
-            numpy.random.randn(filter_frames, *frame_shape).astype(dtype)
-            for _ in range(num_filters)]
-        for w in self.codebook:
-            w /= numpy.linalg.norm(w)
+        super(TemporalCodebook, self).__init__(
+            num_filters, (filter_frames, ) + frame_shape)
 
-        f = len(frame_shape)
-        if f < 2:
+        self.codebook = list(self.codebook)
+
+        # set up self._correlate as an alias to an appropriate correlation fn.
+        try:
             import _pursuit
-            self._correlate = getattr(_pursuit, 'correlate%dd' % (f + 1))
-        else:
-            import scipy.signal
-            def correlate(s, w, r):
-                r[:] = scipy.signal.correlate(s, w, 'valid')
-            self._correlate = correlate
+            if len(frame_shape) == 0:
+                self._correlate = _pursuit.correlate1d
+            if len(frame_shape) == 1:
+                self._correlate = _pursuit.correlate1d_from_2d
+        except ImportError:
+            logging.info('cannot import _pursuit C module !')
+            self._correlate = _correlate
 
     def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Generate a set of codebook coefficients for encoding a signal.
@@ -285,11 +378,11 @@ class Multiple(object):
         coefficient is the scalar multiple of the filter that is present in the
         input signal starting at the given offset.
 
-        See the MultipleTrainer class for an example of how to use these results
-        to update the codebook filters.
+        See the TemporalCodebookTrainer class for an example of how to use these
+        results to update the codebook filters.
         '''
-        def rmsp(s):
-            return numpy.linalg.norm(s) / numpy.sqrt(len(s))
+        def amplitude(s):
+            return abs(s).sum()
 
         lengths = [len(w) for w in self.codebook]
         arange = numpy.arange(len(self.codebook))
@@ -302,7 +395,7 @@ class Multiple(object):
         for i, w in enumerate(self.codebook):
             self._correlate(signal, w, scores[i, :len(signal) - len(w) + 1])
 
-        power = rmsp(signal)
+        amp = amplitude(signal)
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
 
@@ -317,34 +410,22 @@ class Multiple(object):
             if coeff < min_coeff:
                 break
 
-            # check that using this filter does increase signal power.
+            # check that using this filter does not increase signal amplitude.
             signal[offset:end] -= coeff * self.codebook[index]
-            r = rmsp(signal)
-            #logging.debug('coefficient %.3g, filter %d, offset %d yields power %.3g', coeff, index, offset, r)
-            if r > power:
+            a = amplitude(signal)
+            #logging.debug('coefficient %.3g, filter %d, offset %d yields amplitude %.3g', coeff, index, offset, a)
+            if a > amp:
                 break
-            power = r
+            amp = a
 
             # update the correlation cache for the changed part of signal.
             for i, w in enumerate(self.codebook):
                 l = lengths[i] - 1
                 o = max(0, offset - l)
-                self._correlate(signal[o:end + l], w, scores[i, o:min(end, len(signal) - l)])
+                p = min(end, len(signal) - l)
+                self._correlate(signal[o:end + l], w, scores[i, o:p])
 
             yield index, coeff, offset
-
-    def encode(self, signal, min_coeff=0., max_num_coeffs=-1):
-        '''Encode a signal as a set of filter coefficients.
-
-        signal: A signal to encode.
-        min_coeff: Stop encoding when the magnitude of coefficients falls below
-          this threshold. Use 0 to encode until max_num_coeffs is reached.
-        max_num_coeffs: Stop encoding when we get this many coefficients. Use a
-          negative value to encode until min_coeff is reached.
-
-        Returns a tuple of encoding tuples.
-        '''
-        return tuple(self.iterencode(signal, min_coeff, max_num_coeffs))
 
     def decode(self, coefficients, signal_shape):
         '''Decode a dictionary of codebook coefficients as a signal.
@@ -355,20 +436,20 @@ class Multiple(object):
         Returns a signal that consists of the weighted sum of the codebook
         filters given in the encoding coefficients, at the appropriate offsets.
         '''
-        signal = numpy.zeros(signal_shape, self.dtype)
+        signal = numpy.zeros(signal_shape, float)
         for index, coeff, offset in coefficients:
             w = self.codebook[index]
             signal[offset:offset + len(w)] += coeff * w
         return signal
 
 
-class MultipleTrainer(object):
-    '''Train a set of codebook filters using signal data.'''
+class TemporalCodebookTrainer(CodebookTrainer):
+    '''Train a set of temporal codebook filters using signal data.'''
 
     def __init__(self, pursuit,
                  min_coeff=0., max_num_coeffs=-1,
                  momentum=0., l1=0., l2=0.,
-                 padding=0.1, shrink=0.001, grow=0.1):
+                 padding=0.1, shrink=0.005, grow=0.05):
         '''Set up the trainer with some static learning parameters.
 
         pursuit: The matching pursuit object to train.
@@ -386,20 +467,15 @@ class MultipleTrainer(object):
         grow: Add padding to a codebook filter when signal in the padding
           exceeds this threshold.
         '''
-        self.pursuit = pursuit
+        super(TemporalCodebookTrainer, self).__init__(
+            pursuit, min_coeff, max_num_coeffs, momentum, l1, l2)
 
-        self.min_coeff = min_coeff
-        self.max_num_coeffs = max_num_coeffs
-
-        self.momentum = momentum
-        self.l1 = l1
-        self.l2 = l2
+        assert 0 <= padding < 0.5
+        assert shrink < grow
 
         self.padding = padding
         self.shrink = shrink
         self.grow = grow
-
-        self.grad = [numpy.zeros_like(w) for w in self.pursuit.codebook]
 
     def calculate_gradient(self, signal):
         '''Calculate a gradient from a signal.
@@ -416,51 +492,205 @@ class MultipleTrainer(object):
             norm[index] += coeff
         return (g / (n or 1) for g, n in zip(grad, norm))
 
-    def apply_gradient(self, grad, learning_rate):
-        '''Apply gradients to the codebook filters.
+    def _resize(self, i):
+        '''Resize codebook vector i using some energy heuristics.
 
-        grad: A list of gradients to apply to the codebook filters.
-        learning_rate: Move the codebook filters this much toward the gradients.
+        i: The index of the codebook vector to resize.
         '''
-        for i, g in enumerate(grad):
-            w = self.pursuit.codebook[i]
+        if not 0 < self.padding < 0.5:
+            return
+        w = self.pursuit.codebook[i]
+        p = int(len(w) * self.padding)
+        criterion = numpy.concatenate([abs(w)[:p], abs(w)[-p:]]).mean()
+        #logging.debug('filter criterion %.3g', criterion)
+        if criterion < self.shrink:
+            self.pursuit.codebook[i] = w[p:-p]
+            self.grad[i] = self.grad[i][p:-p]
+        if criterion > self.grow:
+            pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
+            self.pursuit.codebook[i] = numpy.concatenate([pad, w, pad])
+            self.grad[i] = numpy.concatenate([pad, self.grad[i], pad])
 
-            l1 = numpy.clip(w, -self.l1, self.l1)
-            l2 = self.l2 * w
-            self.grad[i] *= self.momentum
-            self.grad[i] += (1 - self.momentum) * (g - l1 - l2)
-            w += learning_rate * self.grad[i]
 
-            # expand or clip the codebook filter based on activity.
-            p = int(len(w) * self.padding)
-            criterion = numpy.concatenate([abs(w)[:p], abs(w)[-p:]]).mean()
-            #logging.debug('filter criterion %.3g', criterion)
-            if criterion < self.shrink:
-                w = self.pursuit.codebook[i] = w[p:-p]
-                self.grad[i] = self.grad[i][p:-p]
-            elif criterion > self.grow:
-                pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
-                w = self.pursuit.codebook[i] = numpy.concatenate([pad, w, pad])
-                self.grad[i] = numpy.concatenate([pad, self.grad[i], pad])
+class SpatialCodebook(Codebook):
+    '''A matching pursuit for encoding images or other 2D signals.'''
 
-    def learn(self, signal, learning_rate):
-        '''Calculate and apply a gradient from the given signal.
+    def __init__(self, num_filters, filter_shape, channels=0):
+        '''Initialize a new codebook of static filters.
 
-        signal: A signal to use for collecting and applying gradient data.
-          This signal will not be modified.
-        learning_rate: Move the codebook filters this much toward the gradients.
+        num_filters: The number of filters to build in the codebook.
+        filter_shape: A tuple of integers that specifies the shape of the
+          filters in the codebook.
+        channels: Set this to the number of channels in each element of the
+          signal (and the filters). Leave this set to 0 if your 2D signals
+          have just two values in their shape tuples.
         '''
-        self.apply_gradient(
-            self.calculate_gradient(signal.copy()), learning_rate)
+        super(SpatialCodebook, self).__init__(
+            num_filters, filter_shape + (channels and (channels, ) or ()))
 
-    def reconstruct(self, signal):
-        '''Reconstruct the given signal using our pursuit codebook.
+        self.codebook = list(self.codebook)
 
-        signal: A signal to encode and then reconstruct. This signal will not
-          be modified.
+        # set up self._correlate as an alias to an appropriate correlation fn.
+        try:
+            import _pursuit
+            if channels == 0:
+                self._correlate = _pursuit.correlate2d
+            if channels == 3:
+                self._correlate = _pursuit.correlate2d_from_rgb
+        except ImportError:
+            logging.info('cannot import _pursuit C module !')
+            self._correlate = _correlate
 
-        Returns a numpy array with the same shape as the original signal,
-        containing reconstructed values instead of the original values.
+    def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
+        '''Generate a set of codebook coefficients for encoding a signal.
+
+        signal: A signal to encode.
+        min_coeff: Stop encoding when the magnitude of coefficients falls below
+          this threshold. Use 0 to encode until max_num_coeffs is reached.
+        max_num_coeffs: Stop encoding when we have generated this many
+          coefficients. Use a negative value to encode until min_coeff is
+          reached.
+
+        This method generates a sequence of tuples of the form (index,
+        coefficient, (x offset, y offset)), where index refers to a codebook
+        filter and coefficient is the scalar multiple of the filter that is
+        present in the input signal starting at the given offsets.
+
+        See the SpatialCodebookTrainer class for an example of how to use these
+        results to update the codebook filters.
         '''
-        return self.pursuit.decode(self.pursuit.iterencode(
-            signal.copy(), self.min_coeff, self.max_num_coeffs), signal.shape)
+        def amplitude(s):
+            return abs(s).sum()
+
+        width, height = signal.shape[:2]
+        shapes = [w.shape[:2] for w in self.codebook]
+        arange = numpy.arange(len(self.codebook))
+
+        # we cache the correlations between signal and codebook to avoid
+        # redundant computation.
+        scores = numpy.zeros(
+            (len(self.codebook),
+             width - min(w for w, _ in shapes) + 1,
+             height - min(h for _, h in shapes) + 1),
+            float) - numpy.inf
+        for i, w in enumerate(self.codebook):
+            x, y = shapes[i]
+            self._correlate(signal, w, scores[i, :width - x + 1, :height - y + 1])
+
+        amp = amplitude(signal)
+        while max_num_coeffs != 0:
+            max_num_coeffs -= 1
+
+            # find the largest coefficient, check that it's large enough.
+            x_offsets = scores.argmax(axis=1)
+            y_offsets = scores.argmax(axis=2)
+            coeffs = scores[arange, x_offsets, y_offsets]
+            index = coeffs.argmax()
+            coeff = coeffs[index]
+            x, y = x_offsets[index], y_offsets[index]
+            wx, wy = shapes[index]
+            ex, ey = x + wx, y + wy
+            if coeff < min_coeff:
+                break
+
+            # check that using this filter does not increase signal power.
+            signal[ox:ex, oy:ey] -= coeff * self.codebook[index]
+            a = amplitude(signal)
+            #logging.debug('coefficient %.3g, filter %d, offset %s yields amplitude %.3g', coeff, index, (x, y), a)
+            if a > amp:
+                break
+            amp = a
+
+            # update the correlation cache for the changed part of signal.
+            for i, w in enumerate(self.codebook):
+                wx, wy = shapes[i][0] - 1, shapes[i][1] - 1
+                ox, oy = max(0, ox - wx), max(0, oy - wy)
+                px, py = min(ex, width - wx), min(ey, height - wy)
+                self._correlate(signal[ox:ex + wx, oy:ey + wy], w, scores[i, ox:px, oy:py])
+
+            yield index, coeff, (x, y)
+
+    def decode(self, coefficients, signal_shape):
+        '''Decode a dictionary of codebook coefficients as a signal.
+
+        coefficients: A sequence of (index, coefficient, offset) tuples.
+        signal_shape: The shape of the reconstructed signal.
+
+        Returns a signal that consists of the weighted sum of the codebook
+        filters given in the encoding coefficients, at the appropriate offsets.
+        '''
+        signal = numpy.zeros(signal_shape, float)
+        for index, coeff, (x, y) in coefficients:
+            w = self.codebook[index]
+            a, b = w.shape[:2]
+            signal[x:x + a, y:y + b] += coeff * w
+        return signal
+
+
+class SpatialCodebookTrainer(CodebookTrainer):
+    '''Train a set of spatial codebook filters using signal data.'''
+
+    def __init__(self, pursuit,
+                 min_coeff=0., max_num_coeffs=-1,
+                 momentum=0., l1=0., l2=0.,
+                 padding=0.1, shrink=0.005, grow=0.05):
+        '''Set up the trainer with some static learning parameters.
+
+        pursuit: The matching pursuit object to train.
+        min_coeff: Train by encoding signals to this minimum coefficient
+          value.
+        max_num_coeffs: Train by encoding signals using this many coefficients.
+        momentum: Use this momentum value during gradient descent.
+        l1: L1-regularize the codebook filters with this weight.
+        l2: L2-regularize the codebook filters with this weight.
+        padding: The proportion of each codebook filter to consider as "padding"
+          when growing or shrinking. Values around 0.1 are usually good. None
+          disables growing or shrinking of the codebook filters.
+        shrink: Remove the padding from a codebook filter when the signal in the
+          padding falls below this threshold.
+        grow: Add padding to a codebook filter when signal in the padding
+          exceeds this threshold.
+        '''
+        super(SpatialCodebookTrainer, self).__init__(
+            pursuit, min_coeff, max_num_coeffs, momentum, l1, l2)
+
+        assert 0 <= padding < 0.5
+        assert shrink < grow
+
+        self.padding = padding
+        self.shrink = shrink
+        self.grow = grow
+
+    def calculate_gradient(self, signal):
+        '''Calculate a gradient from a signal.
+
+        signal: A signal to use for collecting gradient information. This signal
+          will be modified in the course of the gradient collection process.
+        '''
+        grad = [numpy.zeros_like(g) for g in self.grad]
+        norm = [0.] * len(grad)
+        for index, coeff, (x, y) in self.pursuit.iterencode(
+                signal, self.min_coeff, self.max_num_coeffs):
+            w, h = self.pursuit.codebook[index].shape[:2]
+            grad[index] += coeff * signal[x:x + w, y:y + h]
+            norm[index] += coeff
+        return (g / (n or 1) for g, n in zip(grad, norm))
+
+    def _resize(self, i):
+        '''Resize codebook vector i using some energy heuristics.
+
+        i: The index of the codebook vector to resize.
+        '''
+        if not 0 < self.padding < 0.5:
+            return
+        w = self.pursuit.codebook[i]
+        p = int(len(w) * self.padding)
+        criterion = numpy.concatenate([abs(w)[:p], abs(w)[-p:]]).mean()
+        #logging.debug('filter criterion %.3g', criterion)
+        if criterion < self.shrink:
+            self.pursuit.codebook[i] = w[p:-p]
+            self.grad[i] = self.grad[i][p:-p]
+        if criterion > self.grow:
+            pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
+            self.pursuit.codebook[i] = numpy.concatenate([pad, w, pad])
+            self.grad[i] = numpy.concatenate([pad, self.grad[i], pad])
