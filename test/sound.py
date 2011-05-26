@@ -27,6 +27,7 @@ import numpy
 import logging
 import numpy.random as rng
 
+sys.path.append(os.path.join(os.path.dirname(__file__), os.pardir))
 import lmj.pursuit
 
 SAMPLE_RATE = 44100
@@ -136,11 +137,11 @@ if __name__ == '__main__':
 
     w = rng.randint(int(SAMPLE_RATE * 0.5), int(SAMPLE_RATE * 1.5))
 
-    train = read_frames(os.path.join('sounds', 'lullaby.wav'))
+    train = read_frames(os.path.join(os.path.dirname(__file__), 'lullaby.wav'))
     a = rng.randint(0, len(train) - w)
     train = train[a:a+w]
 
-    test = read_frames(os.path.join('sounds', 'lullaby.wav'))
+    test = read_frames(os.path.join(os.path.dirname(__file__), 'lullaby.wav'))
     a = rng.randint(0, len(test) - w)
     test = test[a:a+w]
 

@@ -15,7 +15,7 @@ speeds up the algorithm by about a factor of 2). After you've installed those,
 just do the usual setup.py dance ::
 
   python setup.py build
-  ln -s ../build/lib.*/lmj/_pursuit.so lmj
+  ln -s ../$(find build/lib.* -name _correlate.\*) lmj
 
 The second step is needed if you want to use the package from the current
 working directory (e.g., if you want to run the test -- see below). If you're
@@ -28,7 +28,7 @@ The source distribution includes a basic test module that runs matching pursuit
 on a training sound and reports the error after encoding and decoding a test
 sound -- smaller numbers are better. Run this test with ::
 
-  python pursuit_test.py
+  python test/sound.py
 
 from the base directory in the source tree. On my machine, the test takes
 between 1 and 5 minutes to run to completion, but you can stop it at any time.

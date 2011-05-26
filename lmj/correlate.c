@@ -308,7 +308,7 @@ static PyObject *correlate2d_from_rgb(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
-static PyMethodDef PursuitMethods[] = {
+static PyMethodDef CorrelateMethods[] = {
     {"correlate1d", correlate1d, METH_VARARGS,
      "Correlate a 1D signal of length s with a 1D filter of length f."},
     {"correlate1d_from_2d", correlate1d_from_2d, METH_VARARGS,
@@ -321,7 +321,7 @@ static PyMethodDef PursuitMethods[] = {
 };
 
 PyMODINIT_FUNC
-init_pursuit(void) {
+init_correlate(void) {
     import_array();
-    (void) Py_InitModule("_pursuit", PursuitMethods);
+    (void) Py_InitModule("_correlate", CorrelateMethods);
 }

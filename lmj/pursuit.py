@@ -46,11 +46,11 @@ import logging
 try:
     # define a backup correlation function in case the c module isn't present.
     import scipy.signal
-    def _correlate(s, w, r):
+    def _default_correlate(s, w, r):
         r[:] = scipy.signal.correlate(s, w, 'valid')
 except ImportError:
     logging.info('cannot import scipy.signal !')
-    def _correlate(s, w, r):
+    def _default_correlate(s, w, r):
         raise NotImplementedError
 
 
@@ -373,14 +373,14 @@ class TemporalCodebook(Codebook):
 
         # set up self._correlate as an alias to an appropriate correlation fn.
         try:
-            import _pursuit
+            import _correlate
             if len(frame_shape) == 0:
-                self._correlate = _pursuit.correlate1d
+                self._correlate = _correlate.correlate1d
             if len(frame_shape) == 1:
-                self._correlate = _pursuit.correlate1d_from_2d
+                self._correlate = _correlate.correlate1d_from_2d
         except ImportError:
-            logging.info('cannot import _pursuit C module !')
-            self._correlate = _correlate
+            logging.info('cannot import _correlate C module !')
+            self._correlate = _default_correlate
 
     def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Generate a set of codebook coefficients for encoding a signal.
@@ -560,14 +560,14 @@ class SpatialCodebook(Codebook):
 
         # set up self._correlate as an alias to an appropriate correlation fn.
         try:
-            import _pursuit
+            import _correlate
             if channels == 0:
-                self._correlate = _pursuit.correlate2d
+                self._correlate = _correlate.correlate2d
             if channels == 3:
-                self._correlate = _pursuit.correlate2d_from_rgb
+                self._correlate = _correlate.correlate2d_from_rgb
         except ImportError:
-            logging.info('cannot import _pursuit C module !')
-            self._correlate = _correlate
+            logging.info('cannot import _correlate C module !')
+            self._correlate = _default_correlate
 
     def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Generate a set of codebook coefficients for encoding a signal.
