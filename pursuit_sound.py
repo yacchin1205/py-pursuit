@@ -74,7 +74,7 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.7, max_num_coeffs=
     def plot(label):
         if not GRAPHS:
             return
-        for i, w in enumerate(p.codebook):
+        for i, w in enumerate(c.codebook):
             plt.plot([i + 1] * len(w), 'k-', lw=0.5, alpha=0.5, aa=True)
             plt.plot(i + 1 + w, 'k-', lw=1, alpha=0.8, aa=True)
         o = rng.randint(0, len(train) - width - 1)
@@ -88,8 +88,8 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.7, max_num_coeffs=
         if not GRAPHS:
             return
         w = 300
-        p = scipy.signal.correlate(abs(a), numpy.ones(w), 'valid')
-        i = min(p.argmax(), len(a) - w)
+        corr = scipy.signal.correlate(abs(a), numpy.ones(w), 'valid')
+        i = min(corr.argmax(), len(a) - w)
         plt.plot(a[i:i+w], 'b', alpha=0.8, aa=True)
         plt.plot(b[i:i+w], 'k', alpha=0.8, aa=True)
         plt.plot((a - b)[i:i+w], 'r', alpha=0.8, aa=True)
@@ -98,8 +98,8 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.7, max_num_coeffs=
 
     # windowed
     f = 0
-    p = lmj.pursuit.Codebook(codebook, width)
-    t = lmj.pursuit.CodebookTrainer(p, max_num_coeffs=1)
+    c = lmj.pursuit.Codebook(codebook, width)
+    t = lmj.pursuit.Trainer(c, max_num_coeffs=1)
     for _ in range(6):
         for w in random_windows(max_num_coeffs, train, width):
             t.learn(w, learning_rate)
@@ -114,8 +114,8 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.7, max_num_coeffs=
 
     # continuous
     f = 0
-    p = lmj.pursuit.TemporalCodebook(codebook, width)
-    t = lmj.pursuit.TemporalCodebookTrainer(p, max_num_coeffs=max_num_coeffs)
+    c = lmj.pursuit.TemporalCodebook(codebook, width)
+    t = lmj.pursuit.TemporalTrainer(c, max_num_coeffs=max_num_coeffs)
     for _ in range(6):
         t.learn(train, learning_rate)
         f += 1
