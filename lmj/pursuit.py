@@ -54,6 +54,21 @@ except ImportError:
         raise NotImplementedError
 
 
+def _max(a):
+    return a.argmax()
+
+def _softmax(a):
+    cdf = numpy.exp(a - a.max()).cumsum()
+    return numpy.searchsorted(cdf, numpy.random.uniform(0, cdf[-1]))
+
+def _egreedy(eps=0.1):
+    def choose(a):
+        if numpy.random.random < eps:
+            return numpy.random.randint(0, len(a) - 1)
+        return a.argmax()
+    return choose
+
+
 class Codebook(object):
     '''Matching pursuit encodes signals using a codebook of filters.
 
@@ -84,9 +99,14 @@ class Codebook(object):
         '''
         if not isinstance(filter_shape, (tuple, list)):
             filter_shape = (filter_shape, )
+
         self.filters = numpy.random.randn(num_filters, *filter_shape)
         for w in self.filters:
             w /= numpy.linalg.norm(w)
+
+        #self._choose = _softmax
+        #self._choose = _egreedy(0.1)
+        self._choose = _max
 
     def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Encode a signal as a sequence of index, coefficient pairs.
@@ -104,7 +124,7 @@ class Codebook(object):
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
 
-            index = coeffs.argmax()
+            index = self._choose(coeffs)
             coeff = coeffs[index]
             if coeff < min_coeff:
                 break
@@ -184,7 +204,7 @@ class Codebook(object):
                 [(window[:len(w)] * w).sum() for w in self.filters])
             encoding = []
             while True:
-                index = coeffs.argmax()
+                index = self._choose(coeffs)
                 coeff = coeffs[index]
                 if coeff < min_coeff:
                     break
@@ -398,7 +418,7 @@ class TemporalCodebook(Codebook):
             max_num_coeffs -= 1
 
             # find the largest coefficient, check that it's large enough.
-            flat = scores.argmax()
+            flat = self._choose(scores)
             index, offset = numpy.unravel_index(flat, scores.shape)
             coeff = scores[index, offset]
             length = lengths[index]
@@ -495,17 +515,29 @@ class TemporalTrainer(Trainer):
         '''
         if not 0 < self.padding < 0.5:
             return
-        w = self.codebook.filters[i]
+
+        w = abs(self.codebook.filters[i])
         p = int(len(w) * self.padding)
-        criterion = numpy.concatenate([abs(w)[:p], abs(w)[-p:]]).mean()
-        #logging.debug('filter criterion %.3g', criterion)
+        pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
+        cat = numpy.concatenate
+
+        criterion = w[:p].mean()
+        #logging.debug('left criterion %.3g', criterion)
         if criterion < self.shrink:
-            self.codebook.filters[i] = w[p:-p]
-            self.grad[i] = self.grad[i][p:-p]
+            self.codebook.filters[i] = self.codebook.filters[i][p:]
+            self.grad[i] = self.grad[i][p:]
         if criterion > self.grow:
-            pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
-            self.codebook.filters[i] = numpy.concatenate([pad, w, pad])
-            self.grad[i] = numpy.concatenate([pad, self.grad[i], pad])
+            self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
+            self.grad[i] = cat([pad, self.grad[i]])
+
+        criterion = w[-p:].mean()
+        #logging.debug('right criterion %.3g', criterion)
+        if criterion < self.shrink:
+            self.codebook.filters[i] = self.codebook.filters[i][:-p]
+            self.grad[i] = self.grad[i][:-p]
+        if criterion > self.grow:
+            self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
+            self.grad[i] = cat([self.grad[i], pad])
 
 
 class SpatialCodebook(Codebook):
@@ -577,7 +609,7 @@ class SpatialCodebook(Codebook):
             max_num_coeffs -= 1
 
             # find the largest coefficient, check that it's large enough.
-            flat = scores.argmax()
+            flat = self._choose(scores)
             index, x, y = numpy.unravel_index(flat, scores.shape)
             coeff = scores[index, x, y]
             wx, wy = shapes[index]
@@ -673,17 +705,52 @@ class SpatialTrainer(Trainer):
 
         i: The index of the codebook vector to resize.
         '''
-        # TODO
-        if True or not 0 < self.padding < 0.5:
+        if not 0 < self.padding < 0.5:
             return
-        w = self.codebook.filters[i]
-        p = int(len(w) * self.padding)
-        criterion = abs(w)[p:-p].mean()
-        #logging.debug('filter criterion %.3g', criterion)
+
+        w = abs(self.codebook.filters[i])
+        p = int(w.shape[0] * self.padding)
+        q = int(w.shape[1] * self.padding)
+
+        cat = numpy.concatenate
+        pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
+
+        criterion = w[:p].mean()
+        #logging.debug('top criterion %.3g', criterion)
         if criterion < self.shrink:
-            self.codebook.filters[i] = w[p:-p, p:-p]
-            self.grad[i] = self.grad[i][p:-p, p:-p]
+            self.codebook.filters[i] = self.codebook.filters[i][p:]
+            self.grad[i] = self.grad[i][p:]
         if criterion > self.grow:
-            pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
-            self.codebook.filters[i] = numpy.concatenate([pad, w, pad])
-            self.grad[i] = numpy.concatenate([pad, self.grad[i], pad])
+            self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
+            self.grad[i] = cat([pad, self.grad[i]])
+
+        criterion = w[-p:].mean()
+        #logging.debug('bottom criterion %.3g', criterion)
+        if criterion < self.shrink:
+            self.codebook.filters[i] = self.codebook.filters[i][:-p]
+            self.grad[i] = self.grad[i][:-p]
+        if criterion > self.grow:
+            self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
+            self.grad[i] = cat([self.grad[i], pad])
+
+        cat = numpy.hstack
+        pad = numpy.zeros((len(self.codebook.filters[i]), p) + w.shape[2:], w.dtype)
+
+        criterion = w[:, :q].mean()
+        #logging.debug('left criterion %.3g', criterion)
+        if criterion < self.shrink:
+            self.codebook.filters[i] = self.codebook.filters[i][:, q:]
+            self.grad[i] = self.grad[i][:, q:]
+        if criterion > self.grow:
+            self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
+            self.grad[i] = cat([pad, self.grad[i]])
+
+        criterion = w[:, -q:].mean()
+        #logging.debug('right criterion %.3g', criterion)
+        if criterion < self.shrink:
+            self.codebook.filters[i] = self.codebook.filters[i][:, :-q]
+            self.grad[i] = self.grad[i][:, :-q]
+        if criterion > self.grow:
+            self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
+            self.grad[i] = cat([self.grad[i], pad])
+
