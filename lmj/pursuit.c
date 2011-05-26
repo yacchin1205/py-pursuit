@@ -8,7 +8,7 @@ static char err[200];
  * Compute the correlation of a 1D signal of shape (s, ) with a 1D filter of
  * shape (f, ). Stores results in the given 1D array of length s - f + 1.
  *
- * About Nx faster than scipy.signal.correlate(signal, filter, 'valid').
+ * About 12x faster than scipy.signal.correlate(signal, filter, 'valid').
  */
 static PyObject *correlate1d(PyObject *self, PyObject *args) {
     PyArrayObject *signal, *filter, *result;
@@ -48,12 +48,12 @@ static PyObject *correlate1d(PyObject *self, PyObject *args) {
     double *s = (double *) signal->data;
     double *f = (double *) filter->data;
     double *r = (double *) result->data;
-    int i, j;
+    int i, a;
     double acc;
     for (i = 0; i < result->dimensions[0]; ++i) {
         acc = 0.0;
-        for (j = 0; j < flend; ++j)
-            acc += f[j * flens] * s[(i + j) * slens];
+        for (a = 0; a < flend; ++a)
+            acc += f[a * flens] * s[(i + a) * slens];
         r[i] = acc;
     }
 
@@ -67,7 +67,7 @@ static PyObject *correlate1d(PyObject *self, PyObject *args) {
  * dimension in the filter. Stores results in the given 1D array of length
  * s - f + 1.
  *
- * About 50x faster than scipy.signal.correlate(signal, filter, 'valid').
+ * About 16x faster than scipy.signal.correlate(signal, filter, 'valid').
  */
 static PyObject *correlate1d_from_2d(PyObject *self, PyObject *args) {
     PyArrayObject *signal, *filter, *result;
@@ -79,11 +79,11 @@ static PyObject *correlate1d_from_2d(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    if (signal->nd != 1) {
+    if (signal->nd != 2) {
         PyErr_SetString(PyExc_ValueError, "signal must be 2D");
         return NULL;
     }
-    if (filter->nd != 1) {
+    if (filter->nd != 2) {
         PyErr_SetString(PyExc_ValueError, "filter must be 2D");
         return NULL;
     }
@@ -119,13 +119,13 @@ static PyObject *correlate1d_from_2d(PyObject *self, PyObject *args) {
     double *s = (double *) signal->data;
     double *f = (double *) filter->data;
     double *r = (double *) result->data;
-    int i, j, k;
+    int i, a, b;
     double acc;
     for (i = 0; i < result->dimensions[0]; ++i) {
         acc = 0.0;
-        for (j = 0; j < flend; ++j)
-            for (k = 0; k < fwidd; ++k)
-                acc += f[j * flens + k * fwids] * s[(i + j) * slens + k * swids];
+        for (a = 0; a < flend; ++a)
+            for (b = 0; b < fwidd; ++b)
+                acc += f[a * flens + b * fwids] * s[(i + a) * slens + b * swids];
         r[i] = acc;
     }
 
@@ -138,7 +138,7 @@ static PyObject *correlate1d_from_2d(PyObject *self, PyObject *args) {
  * shape (f, g). Stores results in the given 2D array of shape
  * (s - f + 1, t - g + 1).
  *
- * About Nx faster than scipy.signal.correlate(signal, filter, 'valid').
+ * About 13x faster than scipy.signal.correlate(signal, filter, 'valid').
  */
 static PyObject *correlate2d(PyObject *self, PyObject *args) {
     PyArrayObject *signal, *filter, *result;
@@ -228,16 +228,8 @@ static PyObject *correlate2d_from_rgb(PyObject *self, PyObject *args) {
         PyErr_SetString(PyExc_ValueError, "signal must be 3D");
         return NULL;
     }
-    if (signal->dimensions[0] != 3) {
-        PyErr_SetString(PyExc_ValueError, "signal must have 3 as the third dimension");
-        return NULL;
-    }
     if (filter->nd != 3) {
         PyErr_SetString(PyExc_ValueError, "filter must be 3D");
-        return NULL;
-    }
-    if (filter->dimensions[0] != 3) {
-        PyErr_SetString(PyExc_ValueError, "filter must have 3 as the third dimension");
         return NULL;
     }
     if (result->nd != 2) {
