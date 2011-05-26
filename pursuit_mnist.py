@@ -38,12 +38,12 @@ import lmj.pursuit
 FLAGS = optparse.OptionParser()
 FLAGS.add_option('', '--model')
 
-FLAGS.add_option('-b', '--batch-size', type=int, default=20)
+FLAGS.add_option('-b', '--batch-size', type=int, default=10)
 FLAGS.add_option('-f', '--frames', action='store_true')
-FLAGS.add_option('-m', '--min-coeff', type=float, default=0.)
+FLAGS.add_option('-m', '--min-coeff', type=float, default=0.1)
 FLAGS.add_option('-x', '--max-num-coeffs', type=int, default=-1)
-FLAGS.add_option('-a', '--alpha', type=float, default=0.5)
-FLAGS.add_option('-t', '--tau', type=float, default=0.99)
+FLAGS.add_option('-a', '--alpha', type=float, default=0.1)
+FLAGS.add_option('-t', '--tau', type=float, default=0.999)
 FLAGS.add_option('-r', '--rows', type=int, default=5)
 FLAGS.add_option('-c', '--cols', type=int, default=5)
 
@@ -51,8 +51,8 @@ FLAGS.add_option('', '--l1', type=float, default=0.)
 FLAGS.add_option('', '--l2', type=float, default=0.)
 FLAGS.add_option('', '--momentum', type=float, default=0.)
 FLAGS.add_option('', '--padding', type=float, default=0.1)
-FLAGS.add_option('', '--grow', type=float, default=0.05)
-FLAGS.add_option('', '--shrink', type=float, default=0.005)
+FLAGS.add_option('', '--grow', type=float, default=0.15)
+FLAGS.add_option('', '--shrink', type=float, default=0.015)
 
 
 def now():
@@ -76,6 +76,8 @@ if __name__ == '__main__':
         level=logging.DEBUG,
         format='%(levelname).1s %(asctime)s [%(module)s:%(lineno)d] %(message)s')
 
+    numpy.seterr(all='raise')
+
     opts, args = FLAGS.parse_args()
 
     assert len(args) == 1, 'Usage: pursuit_mnist.py DATAFILE'
@@ -84,17 +86,19 @@ if __name__ == '__main__':
     dataset = pickle.load(handle)
     handle.close()
 
-    devset = [dataset[i][0] for i in range(10)]
     updates = -1
     batches = 0.
+    devset = [
+        (dataset[i][0] - 128.) / 128. for i in range(10)] + [
+        (dataset[i][1] - 128.) / 128. for i in range(10)]
     errors = [collections.deque(maxlen=20) for _ in range(10)]
 
-    book = (opts.model and
+    codebook = (opts.model and
             pickle.load(open(opts.model, 'rb')) or
             lmj.pursuit.SpatialCodebook(opts.rows * opts.cols, (10, 10)))
 
     trainer = lmj.pursuit.SpatialTrainer(
-        book,
+        codebook,
         min_coeff=opts.min_coeff,
         max_num_coeffs=opts.max_num_coeffs,
         momentum=opts.momentum,
@@ -108,13 +112,15 @@ if __name__ == '__main__':
     digit = numpy.zeros((28, 28), 'f')
     reconst = numpy.zeros((28, 28), 'f')
     filters = numpy.zeros((opts.rows, opts.cols, 28, 28), 'f')
+    features = numpy.zeros((opts.rows, opts.cols, 28, 28), 'f')
 
     kwargs = dict(cmap=glumpy.colormap.Grey, vmin=0, vmax=255)
     _digit = glumpy.Image(digit, **kwargs)
     _reconst = glumpy.Image(reconst, **kwargs)
-    _filters = [[glumpy.Image(f, vmin=-1, vmax=1) for f in fs] for fs in filters]
+    _features = [[glumpy.Image(f, vmin=0, vmax=2) for f in fs] for fs in features]
+    _filters = [[glumpy.Image(f, vmin=-0.3, vmax=0.3) for f in fs] for fs in filters]
 
-    W = 60 * (opts.cols + 1) + 4
+    W = 60 * (2 * opts.cols + 1) + 4
     H = 60 * opts.rows + 4
 
     win = glumpy.Window(W, H)
@@ -122,7 +128,7 @@ if __name__ == '__main__':
     def get_pixels():
         label = rng.randint(0, 9)
         images = dataset[label]
-        pixels = images[rng.randint(1, len(images) - 1)].astype(float)
+        pixels = images[rng.randint(2, len(images) - 1)].astype(float)
         return (pixels - 128.) / 128.
 
     def learn():
@@ -139,7 +145,7 @@ if __name__ == '__main__':
         Grad = None
         for pixels in batch:
             #trainer.learn(pixels, opts.alpha)
-            grad = trainer.calculate_gradient(pixels)
+            grad = trainer.calculate_gradient(pixels.copy())
             if Grad is None:
                 Grad = list(grad)
             else:
@@ -153,23 +159,35 @@ if __name__ == '__main__':
         return pixels
 
     def update(pixels):
-        digit[:] = pixels
+        enc = codebook.encode(pixels.copy(),
+                              max_num_coeffs=opts.max_num_coeffs,
+                              min_coeff=opts.min_coeff)
+
+        digit[:] = pixels * 128. + 128.
         _digit.update()
 
-        reconst[:] = trainer.reconstruct(pixels) * 128. + 128.
+        reconst[:] = codebook.decode(enc, pixels.shape) * 128. + 128.
         _reconst.update()
+
+        features[:] = 0
+        for i, c, o in enc:
+            features[numpy.unravel_index(i, (opts.rows, opts.cols)) + o] += c
+        [[f.update() for f in fs] for fs in _features]
 
         filters[:] = 0
         for r in range(opts.rows):
             for c in range(opts.cols):
-                f = book.filters[r * opts.cols + c]
-                filters[r, c, :f.shape[0], :f.shape[1]] += f
+                f = codebook.filters[r * opts.cols + c]
+                x, y = f.shape
+                a = (28 - x) // 2
+                b = (28 - y) // 2
+                filters[r, c, a:a+x, b:b+y] += f
         [[f.update() for f in fs] for fs in _filters]
 
     def evaluate():
         for t, pixels in enumerate(devset):
-            estimate = trainer.reconstruct(pixels)
-            errors[t].append(((pixels - estimate) ** 2).mean())
+            estimate = trainer.reconstruct(pixels.copy())
+            errors[t % 10].append(((pixels - estimate) ** 2).sum())
         logging.error('%d<%.3g>: %s',
                       batches,
                       opts.alpha * opts.tau ** batches,
@@ -178,12 +196,18 @@ if __name__ == '__main__':
     @win.event
     def on_draw():
         win.clear()
-        _digit.blit(4, 4, 56, 56)
-        _reconst.blit(4, 64, 56, 56)
+        p = 4
+        W, H = win.get_size()
+        w = int(float(W - p) / (2 * opts.cols + 1))
+        h = int(float(H - p) / opts.rows)
+        _digit.blit(w * opts.cols + p, p, w - p, h - p)
+        _reconst.blit(w * opts.cols + p, h + p, w - p, h - p)
         for r in range(opts.rows):
             fs = _filters[r]
+            Fs = _features[r]
             for c in range(opts.cols):
-                fs[c].blit(60 * (c + 1) + 4, 60 * r + 4, 56, 56)
+                fs[c].blit(w * c + p, h * r + p, w - p, h - p)
+                Fs[c].blit(w * (c + 1 + opts.cols) + p, h * r + p, w - p, h - p)
 
     @win.event
     def on_idle(dt):
@@ -191,10 +215,10 @@ if __name__ == '__main__':
         if updates != 0:
             updates -= 1
             update(learn())
-            win.draw()
             if opts.frames:
                 save_frame(W, H)
             evaluate()
+        win.draw()
 
     @win.event
     def on_key_press(key, modifiers):
