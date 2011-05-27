@@ -41,30 +41,36 @@ gradient-ascent training for the filters.
 
 import numpy
 import logging
+import numpy.random as rng
 
-
+_have_correlate = False
 try:
-    # define a backup correlation function in case the c module isn't present.
-    import scipy.signal
-    def _default_correlate(s, w, r):
-        r[:] = scipy.signal.correlate(s, w, 'valid')
+    import _correlate
+    _have_correlate = True
 except ImportError:
-    logging.info('cannot import scipy.signal !')
-    def _default_correlate(s, w, r):
-        raise NotImplementedError
+    logging.info('cannot import _correlate module, trying scipy')
+    try:
+        import scipy.signal
+    except ImportError:
+        logging.error('o noes ! cannot import scipy.signal !')
 
 
-def _max(a):
+# define a backup correlation function in case the c module isn't present.
+def _default_correlate(s, w, r):
+    r[:] = scipy.signal.correlate(s, w, 'valid')
+
+
+def _argmax(a):
     return a.argmax()
 
 def _softmax(a):
     cdf = numpy.exp(a - a.max()).cumsum()
-    return numpy.searchsorted(cdf, numpy.random.uniform(0, cdf[-1]))
+    return numpy.searchsorted(cdf, rng.uniform(0, cdf[-1]))
 
 def _egreedy(eps=0.1):
     def choose(a):
-        if numpy.random.random < eps:
-            return numpy.random.randint(0, len(a) - 1)
+        if rng.uniform(0, 1) < eps:
+            return rng.randint(0, len(a) - 1)
         return a.argmax()
     return choose
 
@@ -90,23 +96,33 @@ class Codebook(object):
     learning process for inferring codebook filters from data.
     '''
 
-    def __init__(self, num_filters, filter_shape):
+    def __init__(self, num_filters, filter_shape, choice='argmax'):
         '''Initialize a new codebook of static filters.
 
         num_filters: The number of filters to build in the codebook.
         filter_shape: A tuple of integers that specifies the shape of the
           filters in the codebook.
+        choice: A string describing the strategy for choosing coefficients
+          during encoding. Defaults to using the argmax() function, but may be
+          one of 'softmax' or 'egreedy(-E)?' with epsilon E.
         '''
         if not isinstance(filter_shape, (tuple, list)):
             filter_shape = (filter_shape, )
 
-        self.filters = numpy.random.randn(num_filters, *filter_shape)
+        self.filters = rng.randn(num_filters, *filter_shape)
         for w in self.filters:
             w /= numpy.linalg.norm(w)
 
-        #self._choose = _softmax
-        #self._choose = _egreedy(0.1)
-        self._choose = _max
+        if choice.startswith('e'):
+            try:
+                eps = float(choice.split('-')[-1])
+            except:
+                eps = 0.1
+            self._choose = _egreedy(eps)
+        elif choice.startswith('s'):
+            self._choose = _softmax
+        else:
+            self._choose = _argmax
 
     def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Encode a signal as a sequence of index, coefficient pairs.
@@ -358,29 +374,29 @@ class TemporalCodebook(Codebook):
     "Efficient Auditory Coding" (Nature).
     '''
 
-    def __init__(self, num_filters, filter_frames, frame_shape=()):
+    def __init__(self, num_filters, filter_frames, frame_shape=(), choice='argmax'):
         '''Initialize a new codebook to a set of random filters.
 
         num_filters: The number of filters to use in our codebook.
         filter_frames: The length (in frames) of filters that we will use for
           our initial codebook.
         frame_shape: The shape of each frame of data that we will encode.
+        choice: A string describing the strategy for choosing coefficients
+          during encoding. Defaults to using the argmax() function, but may be
+          one of 'softmax' or 'egreedy(-E)?' with epsilon E.
         '''
         super(TemporalCodebook, self).__init__(
-            num_filters, (filter_frames, ) + frame_shape)
+            num_filters,
+            (filter_frames, ) + frame_shape,
+            choice)
 
         self.filters = list(self.filters)
 
-        # set up self._correlate as an alias to an appropriate correlation fn.
-        try:
-            import _correlate
-            if len(frame_shape) == 0:
-                self._correlate = _correlate.correlate1d
-            if len(frame_shape) == 1:
-                self._correlate = _correlate.correlate1d_from_2d
-        except ImportError:
-            logging.info('cannot import _correlate C module !')
-            self._correlate = _default_correlate
+        self._correlate = _default_correlate
+        if _have_correlate and len(frame_shape) == 0:
+            self._correlate = _correlate.correlate1d
+        if _have_correlate and len(frame_shape) == 1:
+            self._correlate = _correlate.correlate1d_from_2d
 
     def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Generate a set of codebook coefficients for encoding a signal.
@@ -400,9 +416,6 @@ class TemporalCodebook(Codebook):
         See the TemporalTrainer class for an example of how to use these results
         to update the codebook filters.
         '''
-        def amplitude(s):
-            return abs(s).sum()
-
         lengths = [len(w) for w in self.filters]
 
         # we cache the correlations between signal and codebook to avoid
@@ -413,7 +426,7 @@ class TemporalCodebook(Codebook):
         for i, w in enumerate(self.filters):
             self._correlate(signal, w, scores[i, :len(signal) - len(w) + 1])
 
-        amp = amplitude(signal)
+        amplitude = abs(signal).sum()
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
 
@@ -428,11 +441,11 @@ class TemporalCodebook(Codebook):
 
             # check that using this filter does not increase signal amplitude.
             signal[offset:end] -= coeff * self.filters[index]
-            a = amplitude(signal)
+            a = abs(signal).sum()
             #logging.debug('coefficient %.3g, filter %d, offset %d yields amplitude %.3g', coeff, index, offset, a)
-            if a > amp:
+            if a > amplitude:
                 break
-            amp = a
+            amplitude = a
 
             # update the correlation cache for the changed part of signal.
             for i, w in enumerate(self.filters):
@@ -543,7 +556,7 @@ class TemporalTrainer(Trainer):
 class SpatialCodebook(Codebook):
     '''A matching pursuit for encoding images or other 2D signals.'''
 
-    def __init__(self, num_filters, filter_shape, channels=0):
+    def __init__(self, num_filters, filter_shape, channels=0, choice='argmax'):
         '''Initialize a new codebook of static filters.
 
         num_filters: The number of filters to build in the codebook.
@@ -552,22 +565,22 @@ class SpatialCodebook(Codebook):
         channels: Set this to the number of channels in each element of the
           signal (and the filters). Leave this set to 0 if your 2D signals
           have just two values in their shape tuples.
+        choice: A string describing the strategy for choosing coefficients
+          during encoding. Defaults to using the argmax() function, but may be
+          one of 'softmax' or 'egreedy(-E)?' with epsilon E.
         '''
         super(SpatialCodebook, self).__init__(
-            num_filters, filter_shape + (channels and (channels, ) or ()))
+            num_filters,
+            filter_shape + ((channels, ) if channels else ()),
+            choice)
 
         self.filters = list(self.filters)
 
-        # set up self._correlate as an alias to an appropriate correlation fn.
-        try:
-            import _correlate
-            if channels == 0:
-                self._correlate = _correlate.correlate2d
-            if channels == 3:
-                self._correlate = _correlate.correlate2d_from_rgb
-        except ImportError:
-            logging.info('cannot import _correlate C module !')
-            self._correlate = _default_correlate
+        self._correlate = _default_correlate
+        if _have_correlate and channels == 0:
+            self._correlate = _correlate.correlate2d
+        if _have_correlate and channels == 3:
+            self._correlate = _correlate.correlate2d_from_rgb
 
     def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Generate a set of codebook coefficients for encoding a signal.
@@ -587,9 +600,6 @@ class SpatialCodebook(Codebook):
         See the SpatialTrainer class for an example of how to use these
         results to update the codebook filters.
         '''
-        def amplitude(s):
-            return abs(s).sum()
-
         width, height = signal.shape[:2]
         shapes = [w.shape[:2] for w in self.filters]
 
@@ -604,7 +614,7 @@ class SpatialCodebook(Codebook):
             x, y = shapes[i]
             self._correlate(signal, w, scores[i, :width - x + 1, :height - y + 1])
 
-        amp = amplitude(signal)
+        amplitude = abs(signal).sum()
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
 
@@ -617,13 +627,13 @@ class SpatialCodebook(Codebook):
             if coeff < min_coeff:
                 break
 
-            # check that using this filter does not increase signal power.
+            # check that using this filter does not increase signal amplitude.
             signal[x:ex, y:ey] -= coeff * self.filters[index]
-            a = amplitude(signal)
+            a = abs(signal).sum()
             #logging.debug('coefficient %.3g, filter %d, offset %s yields amplitude %.3g', coeff, index, (x, y), a)
-            if a > amp:
+            if a > amplitude:
                 break
-            amp = a
+            amplitude = a
 
             # update the correlation cache for the changed part of signal.
             for i, w in enumerate(self.filters):
