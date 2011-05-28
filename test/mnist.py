@@ -87,10 +87,10 @@ if __name__ == '__main__':
     batches = 0.
     devset = []
     for _ in range(min(len(args) // 2, 10)):
-        arg = args[rng.randint(0, len(args) - 1)]
+        arg = args[rng.randint(len(args))]
         devset.append(load_image(arg))
         args.remove(arg)
-    trainset = [load_image(arg) for arg in args]
+    images = [load_image(arg) for arg in args]
     errors = collections.deque(maxlen=10)
 
     codebook = (opts.model and
@@ -109,8 +109,8 @@ if __name__ == '__main__':
         shrink=opts.shrink,
         )
 
-    width = max(x.shape[0] for x in trainset)
-    height = max(x.shape[1] for x in trainset)
+    width = max(x.shape[0] for x in images)
+    height = max(x.shape[1] for x in images)
 
     source = numpy.zeros((width, height), 'f')
     reconst = numpy.zeros((width, height), 'f')
@@ -132,8 +132,7 @@ if __name__ == '__main__':
         global batches, filters, _filters
 
         batches += 1
-        batch = [trainset[rng.randint(0, len(trainset) - 1)]
-                 for _ in range(opts.batch_size)]
+        batch = [images[rng.randint(len(images))] for _ in range(opts.batch_size)]
 
         start = time.time()
         Grad = None
