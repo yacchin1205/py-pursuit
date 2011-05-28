@@ -440,8 +440,9 @@ class TemporalCodebook(Codebook):
                 break
 
             # check that using this filter does not increase signal amplitude.
+            a = amplitude - abs(signal[offset:end]).sum()
             signal[offset:end] -= coeff * self.filters[index]
-            a = abs(signal).sum()
+            a += abs(signal[offset:end]).sum()
             #logging.debug('coefficient %.3g, filter %d, offset %d yields amplitude %.3g', coeff, index, offset, a)
             if a > amplitude:
                 break
@@ -526,11 +527,15 @@ class TemporalTrainer(Trainer):
 
         i: The index of the codebook vector to resize.
         '''
+        w = abs(self.codebook.filters[i])
+
         if not 0 < self.padding < 0.5:
             return
 
-        w = abs(self.codebook.filters[i])
         p = int(len(w) * self.padding)
+        if not p:
+            return
+
         pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
         cat = numpy.concatenate
 
@@ -628,8 +633,9 @@ class SpatialCodebook(Codebook):
                 break
 
             # check that using this filter does not increase signal amplitude.
+            a = amplitude - abs(signal[x:ex, y:ey]).sum()
             signal[x:ex, y:ey] -= coeff * self.filters[index]
-            a = abs(signal).sum()
+            a += abs(signal[x:ex, y:ey]).sum()
             #logging.debug('coefficient %.3g, filter %d, offset %s yields amplitude %.3g', coeff, index, (x, y), a)
             if a > amplitude:
                 break
@@ -715,12 +721,15 @@ class SpatialTrainer(Trainer):
 
         i: The index of the codebook vector to resize.
         '''
+        w = abs(self.codebook.filters[i])
+
         if not 0 < self.padding < 0.5:
             return
 
-        w = abs(self.codebook.filters[i])
         p = int(w.shape[0] * self.padding)
         q = int(w.shape[1] * self.padding)
+        if not p or not q:
+            return
 
         cat = numpy.concatenate
         pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
@@ -744,7 +753,7 @@ class SpatialTrainer(Trainer):
             self.grad[i] = cat([self.grad[i], pad])
 
         cat = numpy.hstack
-        pad = numpy.zeros((len(self.codebook.filters[i]), p) + w.shape[2:], w.dtype)
+        pad = numpy.zeros((len(self.codebook.filters[i]), q) + w.shape[2:], w.dtype)
 
         criterion = w[:, :q].mean()
         #logging.debug('left criterion %.3g', criterion)
