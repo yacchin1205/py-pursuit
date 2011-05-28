@@ -52,7 +52,7 @@ except ImportError:
     try:
         import scipy.signal
     except ImportError:
-        logging.error('o noes ! cannot import scipy.signal !')
+        logging.error('O noes ! Cannot import scipy.signal !')
 
 
 # define a backup correlation function in case the c module isn't present.
@@ -70,7 +70,7 @@ def _softmax(a):
 def _egreedy(eps=0.1):
     def choose(a):
         if rng.uniform(0, 1) < eps:
-            return rng.randint(0, len(a) - 1)
+            return rng.randint(len(a))
         return a.argmax()
     return choose
 
@@ -113,16 +113,15 @@ class Codebook(object):
         for w in self.filters:
             w /= numpy.linalg.norm(w)
 
+        self._choose = _argmax
         if choice.startswith('e'):
             try:
                 eps = float(choice.split('-')[-1])
             except:
                 eps = 0.1
             self._choose = _egreedy(eps)
-        elif choice.startswith('s'):
+        if choice.startswith('s'):
             self._choose = _softmax
-        else:
-            self._choose = _argmax
 
     def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Encode a signal as a sequence of index, coefficient pairs.
@@ -257,12 +256,14 @@ class Codebook(object):
 class Trainer(object):
     '''Train the codebook filters in a matching pursuit encoder.'''
 
-    def __init__(self, codebook,
+    def __init__(self, codebook, samples=1,
                  min_coeff=0., max_num_coeffs=-1,
                  momentum=0., l1=0., l2=0.):
         '''Initialize this trainer with some learning parameters.
 
         codebook: The matching pursuit codebook to train.
+        samples: The number of encoding samples to draw when approximating the
+          gradient.
         min_coeff: Train by encoding signals to this minimum coefficient
           value.
         max_num_coeffs: Train by encoding signals using this many coefficients.
@@ -271,6 +272,8 @@ class Trainer(object):
         l2: L2-regularize the codebook filters with this weight.
         '''
         self.codebook = codebook
+
+        self.samples = samples if codebook._choose is _softmax else 1
 
         self.min_coeff = min_coeff
         self.max_num_coeffs = max_num_coeffs
@@ -289,10 +292,12 @@ class Trainer(object):
         '''
         grad = numpy.zeros_like(self.grad)
         norm = [0] * len(grad)
-        for index, coeff in self.codebook.iterencode(
-                signal, self.min_coeff, self.max_num_coeffs):
-            grad[index] += coeff * signal
-            norm[index] += coeff
+        for _ in range(self.samples):
+            s = signal.copy()
+            for index, coeff in self.codebook.iterencode(
+                    s, self.min_coeff, self.max_num_coeffs):
+                grad[index] += coeff * s
+                norm[index] += coeff
         return (g / (n or 1) for g, n in zip(grad, norm))
 
     def apply_gradient(self, grad, learning_rate):
@@ -515,11 +520,13 @@ class TemporalTrainer(Trainer):
         '''
         grad = [numpy.zeros_like(g) for g in self.grad]
         norm = [0.] * len(grad)
-        for index, coeff, offset in self.codebook.iterencode(
-                signal, self.min_coeff, self.max_num_coeffs):
-            o = len(self.codebook.filters[index])
-            grad[index] += coeff * signal[offset:offset + o]
-            norm[index] += coeff
+        for _ in range(self.samples):
+            s = signal.copy()
+            for index, coeff, offset in self.codebook.iterencode(
+                    s, self.min_coeff, self.max_num_coeffs):
+                o = len(self.codebook.filters[index])
+                grad[index] += coeff * s[offset:offset + o]
+                norm[index] += coeff
         return (g / (n or 1) for g, n in zip(grad, norm))
 
     def _resize(self, i):
@@ -709,11 +716,13 @@ class SpatialTrainer(Trainer):
         '''
         grad = [numpy.zeros_like(g) for g in self.grad]
         norm = [0.] * len(grad)
-        for index, coeff, (x, y) in self.codebook.iterencode(
-                signal, self.min_coeff, self.max_num_coeffs):
-            w, h = self.codebook.filters[index].shape[:2]
-            grad[index] += coeff * signal[x:x + w, y:y + h]
-            norm[index] += coeff
+        for _ in range(self.samples):
+            s = signal.copy()
+            for index, coeff, (x, y) in self.codebook.iterencode(
+                    s, self.min_coeff, self.max_num_coeffs):
+                w, h = self.codebook.filters[index].shape[:2]
+                grad[index] += coeff * s[x:x + w, y:y + h]
+                norm[index] += coeff
         return (g / (n or 1) for g, n in zip(grad, norm))
 
     def _resize(self, i):
