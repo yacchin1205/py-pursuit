@@ -65,7 +65,7 @@ def _argmax(a):
 
 def _softmax(a):
     cdf = numpy.exp(a - a.max()).cumsum()
-    return numpy.searchsorted(cdf, rng.uniform(0, cdf[-1]))
+    return cdf.searchsorted(rng.uniform(0, cdf[-1]))
 
 def _egreedy(eps=0.1):
     def choose(a):
@@ -256,20 +256,26 @@ class Codebook(object):
 class Trainer(object):
     '''Train the codebook filters in a matching pursuit encoder.'''
 
-    def __init__(self, codebook, samples=1,
+    def __init__(self, codebook,
                  min_coeff=0., max_num_coeffs=-1,
-                 momentum=0., l1=0., l2=0.):
+                 samples=1, momentum=0., l1=0., l2=0.,
+                 min_activity_ratio=0.):
         '''Initialize this trainer with some learning parameters.
 
         codebook: The matching pursuit codebook to train.
-        samples: The number of encoding samples to draw when approximating the
-          gradient.
         min_coeff: Train by encoding signals to this minimum coefficient
           value.
         max_num_coeffs: Train by encoding signals using this many coefficients.
+        samples: The number of encoding samples to draw when approximating the
+          gradient.
         momentum: Use this momentum value during gradient descent.
         l1: L1-regularize the codebook filters with this weight.
         l2: L2-regularize the codebook filters with this weight.
+        min_activity_ratio: When applying gradients, replace filters whose total
+          activity (sum of coefficients) since the last gradient step are below
+          this proportion of the median activity for the codebook. This should
+          be a number in [0, 1], where 0 means never replace any filters, and 1
+          means replace all filters whose activity is below the median.
         '''
         self.codebook = codebook
 
@@ -283,6 +289,7 @@ class Trainer(object):
         self.l2 = l2
 
         self.grad = [numpy.zeros_like(w) for w in self.codebook.filters]
+        self.min_activity_ratio = min_activity_ratio
 
     def calculate_gradient(self, signal):
         '''Calculate a gradient from a signal.
@@ -290,29 +297,53 @@ class Trainer(object):
         signal: A signal to use for collecting gradient information. This signal
           will be modified in the course of the gradient collection process.
         '''
-        grad = numpy.zeros_like(self.grad)
-        norm = [0] * len(grad)
+        grad = [numpy.zeros_like(g) for g in self.grad]
+        activity = numpy.zeros((len(self.grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
             for index, coeff in self.codebook.iterencode(
                     s, self.min_coeff, self.max_num_coeffs):
                 grad[index] += coeff * s
-                norm[index] += coeff
-        return (g / (n or 1) for g, n in zip(grad, norm))
+                activity[index] += coeff
+        return grad, activity
 
-    def apply_gradient(self, grad, learning_rate):
+    def apply_gradient(self, grad, activity, learning_rate):
         '''Apply gradients to the codebook filters.
 
         grad: A sequence of gradients to apply to the codebook filters.
+        activity: A sequence of scalars indicating how active each codebook
+          filter was during gradient calculation.
         learning_rate: Move the codebook filters this much toward the gradients.
         '''
-        for i, g in enumerate(grad):
+        median = numpy.sort(activity)[len(activity) // 2]
+
+        shapes = numpy.array([w.shape for w in self.codebook.filters])
+        mu = shapes.mean(axis=0)
+        sigma = shapes.std(axis=0)
+        std = sum(w.std() for w in self.codebook.filters) / len(activity)
+
+        for i, (g, a) in enumerate(zip(grad, activity)):
             w = self.codebook.filters[i]
-            l1 = numpy.clip(w, -self.l1, self.l1)
-            l2 = self.l2 * w
-            self.grad[i] *= self.momentum
-            self.grad[i] += (1 - self.momentum) * (g - l1 - l2)
-            w += learning_rate * self.grad[i]
+            logging.debug(
+                '%d: norm %.3f, grad %.3f, activity %.3f (vs median %.3f)',
+                i, numpy.linalg.norm(w), numpy.linalg.norm(g), a, median)
+
+            # if the activity of this codebook filter is below threshold,
+            # replace it with a new noise filter to encourage future usage.
+            if a < self.min_activity_ratio * median:
+                self.codebook.filters[i] = std * rng.randn(
+                    *rng.multivariate_normal(mu, numpy.diag(sigma)))
+                self.grad[i] = numpy.zeros_like(self.codebook.filters[i])
+                continue
+
+            if numpy.linalg.norm(g):
+                assert a
+                l1 = numpy.clip(w, -self.l1, self.l1)
+                l2 = self.l2 * w
+                self.grad[i] *= self.momentum
+                self.grad[i] += (1 - self.momentum) * (g / a - l1 - l2)
+                w += learning_rate * self.grad[i]
+
             self._resize(i)
 
     def _resize(self, i):
@@ -331,8 +362,8 @@ class Trainer(object):
           will not be modified.
         learning_rate: Move the codebook filters this much toward the gradients.
         '''
-        self.apply_gradient(
-            self.calculate_gradient(signal.copy()), learning_rate)
+        grad, activity = self.calculate_gradient(signal.copy())
+        self.apply_gradient(grad, activity, learning_rate)
 
     def reconstruct(self, signal):
         '''Reconstruct the given signal using our pursuit codebook.
@@ -436,8 +467,7 @@ class TemporalCodebook(Codebook):
             max_num_coeffs -= 1
 
             # find the largest coefficient, check that it's large enough.
-            flat = self._choose(scores)
-            index, offset = numpy.unravel_index(flat, scores.shape)
+            index, offset = numpy.unravel_index(self._choose(scores), scores.shape)
             coeff = scores[index, offset]
             length = lengths[index]
             end = offset + length
@@ -483,7 +513,8 @@ class TemporalTrainer(Trainer):
 
     def __init__(self, codebook,
                  min_coeff=0., max_num_coeffs=-1,
-                 momentum=0., l1=0., l2=0.,
+                 samples=1, momentum=0., l1=0., l2=0.,
+                 min_activity_ratio=0.,
                  padding=0.1, shrink=0.005, grow=0.05):
         '''Set up the trainer with some static learning parameters.
 
@@ -491,9 +522,16 @@ class TemporalTrainer(Trainer):
         min_coeff: Train by encoding signals to this minimum coefficient
           value.
         max_num_coeffs: Train by encoding signals using this many coefficients.
+        samples: The number of encoding samples to draw when approximating the
+          gradient.
         momentum: Use this momentum value during gradient descent.
         l1: L1-regularize the codebook filters with this weight.
         l2: L2-regularize the codebook filters with this weight.
+        min_activity_ratio: When applying gradients, replace filters whose total
+          activity (sum of coefficients) since the last gradient step are below
+          this proportion of the median activity for the codebook. This should
+          be a number in [0, 1], where 0 means never replace any filters, and 1
+          means replace all filters whose activity is below the median.
         padding: The proportion of each codebook filter to consider as "padding"
           when growing or shrinking. Values around 0.1 are usually good. None
           disables growing or shrinking of the codebook filters.
@@ -503,7 +541,9 @@ class TemporalTrainer(Trainer):
           exceeds this threshold.
         '''
         super(TemporalTrainer, self).__init__(
-            codebook, min_coeff, max_num_coeffs, momentum, l1, l2)
+            codebook=codebook, min_coeff=min_coeff,
+            max_num_coeffs=max_num_coeffs, samples=samples, momentum=momentum,
+            l1=l1, l2=l2, min_activity_ratio=min_activity_ratio)
 
         assert 0 <= padding < 0.5
         assert shrink < grow
@@ -519,15 +559,15 @@ class TemporalTrainer(Trainer):
           will be modified in the course of the gradient collection process.
         '''
         grad = [numpy.zeros_like(g) for g in self.grad]
-        norm = [0.] * len(grad)
+        activity = numpy.zeros((len(grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
             for index, coeff, offset in self.codebook.iterencode(
                     s, self.min_coeff, self.max_num_coeffs):
                 o = len(self.codebook.filters[index])
                 grad[index] += coeff * s[offset:offset + o]
-                norm[index] += coeff
-        return (g / (n or 1) for g, n in zip(grad, norm))
+                activity[index] += coeff
+        return grad, activity
 
     def _resize(self, i):
         '''Resize codebook vector i using some energy heuristics.
@@ -631,11 +671,10 @@ class SpatialCodebook(Codebook):
             max_num_coeffs -= 1
 
             # find the largest coefficient, check that it's large enough.
-            flat = self._choose(scores)
-            index, x, y = numpy.unravel_index(flat, scores.shape)
+            index, x, y = numpy.unravel_index(self._choose(scores), scores.shape)
+            ex = x + shapes[index][0]
+            ey = y + shapes[index][1]
             coeff = scores[index, x, y]
-            wx, wy = shapes[index]
-            ex, ey = x + wx, y + wy
             if coeff < min_coeff:
                 break
 
@@ -679,7 +718,8 @@ class SpatialTrainer(Trainer):
 
     def __init__(self, codebook,
                  min_coeff=0., max_num_coeffs=-1,
-                 momentum=0., l1=0., l2=0.,
+                 samples=1, momentum=0., l1=0., l2=0.,
+                 min_activity_ratio=0.,
                  padding=0.1, shrink=0.005, grow=0.05):
         '''Set up the trainer with some static learning parameters.
 
@@ -687,9 +727,16 @@ class SpatialTrainer(Trainer):
         min_coeff: Train by encoding signals to this minimum coefficient
           value.
         max_num_coeffs: Train by encoding signals using this many coefficients.
+        samples: The number of encoding samples to draw when approximating the
+          gradient.
         momentum: Use this momentum value during gradient descent.
         l1: L1-regularize the codebook filters with this weight.
         l2: L2-regularize the codebook filters with this weight.
+        min_activity_ratio: When applying gradients, replace filters whose total
+          activity (sum of coefficients) since the last gradient step are below
+          this proportion of the median activity for the codebook. This should
+          be a number in [0, 1], where 0 means never replace any filters, and 1
+          means replace all filters whose activity is below the median.
         padding: The proportion of each codebook filter to consider as "padding"
           when growing or shrinking. Values around 0.1 are usually good. None
           disables growing or shrinking of the codebook filters.
@@ -699,7 +746,9 @@ class SpatialTrainer(Trainer):
           exceeds this threshold.
         '''
         super(SpatialTrainer, self).__init__(
-            codebook, min_coeff, max_num_coeffs, momentum, l1, l2)
+            codebook=codebook, min_coeff=min_coeff,
+            max_num_coeffs=max_num_coeffs, samples=samples, momentum=momentum,
+            l1=l1, l2=l2, min_activity_ratio=min_activity_ratio)
 
         assert 0 <= padding < 0.5
         assert shrink < grow
@@ -715,15 +764,15 @@ class SpatialTrainer(Trainer):
           will be modified in the course of the gradient collection process.
         '''
         grad = [numpy.zeros_like(g) for g in self.grad]
-        norm = [0.] * len(grad)
+        activity = numpy.zeros((len(grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
             for index, coeff, (x, y) in self.codebook.iterencode(
                     s, self.min_coeff, self.max_num_coeffs):
                 w, h = self.codebook.filters[index].shape[:2]
                 grad[index] += coeff * s[x:x + w, y:y + h]
-                norm[index] += coeff
-        return (g / (n or 1) for g, n in zip(grad, norm))
+                activity[index] += coeff
+        return grad, activity
 
     def _resize(self, i):
         '''Resize codebook vector i using some energy heuristics.
