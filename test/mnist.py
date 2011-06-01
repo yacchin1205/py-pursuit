@@ -39,21 +39,24 @@ import lmj.pursuit
 FLAGS = optparse.OptionParser()
 FLAGS.add_option('', '--model')
 
-FLAGS.add_option('-b', '--batch-size', type=int, default=1)
-FLAGS.add_option('-f', '--frames', action='store_true')
-FLAGS.add_option('-m', '--min-coeff', type=float, default=0.1)
-FLAGS.add_option('-x', '--max-num-coeffs', type=int, default=-1)
-FLAGS.add_option('-a', '--alpha', type=float, default=0.1)
-FLAGS.add_option('-t', '--tau', type=float, default=1.)
-FLAGS.add_option('-r', '--rows', type=int, default=10)
-FLAGS.add_option('-c', '--cols', type=int, default=10)
+FLAGS.add_option('-b', '--batch-size', type=int, default=3)
+FLAGS.add_option('-c', '--min-coeff', type=float, default=0.1)
+FLAGS.add_option('-n', '--max-num-coeffs', type=int, default=-1)
+FLAGS.add_option('-a', '--min-activity-ratio', type=float, default=0.)
 
+FLAGS.add_option('-R', '--rows', type=int, default=10)
+FLAGS.add_option('-C', '--cols', type=int, default=10)
+
+FLAGS.add_option('', '--learning-rate', type=float, default=0.1)
+FLAGS.add_option('', '--learning-decay', type=float, default=0.99)
 FLAGS.add_option('', '--l1', type=float, default=0.)
 FLAGS.add_option('', '--l2', type=float, default=0.)
 FLAGS.add_option('', '--momentum', type=float, default=0.)
 FLAGS.add_option('', '--padding', type=float, default=0.1)
 FLAGS.add_option('', '--grow', type=float, default=0.1)
-FLAGS.add_option('', '--shrink', type=float, default=0.01)
+FLAGS.add_option('', '--shrink', type=float, default=0.001)
+
+FLAGS.add_option('-s', '--save-frames', action='store_true')
 
 
 def now():
@@ -61,7 +64,7 @@ def now():
 
 
 def load_image(path):
-    return numpy.asarray(Image.open(path).convert('L')) / 128. - 1.
+    return (numpy.asarray(Image.open(path).convert('L')) - 128.) / 128.
 
 
 def save_frame(width, height):
@@ -95,13 +98,14 @@ if __name__ == '__main__':
 
     codebook = (opts.model and
             pickle.load(open(opts.model, 'rb')) or
-            lmj.pursuit.SpatialCodebook(opts.rows * opts.cols, (10, 10)))
+            lmj.pursuit.SpatialCodebook(opts.rows * opts.cols, (20, 20)))
 
     trainer = lmj.pursuit.SpatialTrainer(
         codebook,
         min_coeff=opts.min_coeff,
         max_num_coeffs=opts.max_num_coeffs,
         momentum=opts.momentum,
+        min_activity_ratio=opts.min_activity_ratio,
         l1=opts.l1,
         l2=opts.l2,
         padding=opts.padding,
@@ -135,18 +139,20 @@ if __name__ == '__main__':
         batch = [images[rng.randint(len(images))] for _ in range(opts.batch_size)]
 
         start = time.time()
-        Grad = None
+        grad = None
+        activity = None
         for pixels in batch:
-            #trainer.learn(pixels, opts.alpha)
-            grad = trainer.calculate_gradient(pixels.copy())
-            if Grad is None:
-                Grad = list(grad)
+            #trainer.learn(pixels, opts.learning_rate)
+            g, a = trainer.calculate_gradient(pixels.copy())
+            if grad is None:
+                grad = g
+                activity = a
             else:
-                for G, g in zip(Grad, grad):
-                    G += g
-        trainer.apply_gradient(
-            (g / opts.batch_size for g in Grad),
-            learning_rate=opts.alpha * opts.tau ** batches)
+                for t, s in zip(grad, g):
+                    t += s
+                activity += a
+        alpha = opts.learning_rate * opts.learning_decay ** batches
+        trainer.apply_gradient(grad, activity, learning_rate=alpha)
         logging.info('processed batch in %dms', 1000 * (time.time() - start))
 
         enc = codebook.encode(pixels.copy(),
@@ -156,10 +162,7 @@ if __name__ == '__main__':
         estimate = codebook.decode(enc, pixels.shape)
 
         errors.append(abs(pixels - estimate).sum())
-        logging.error('%d<%.3g>: error %d',
-                      batches,
-                      opts.alpha * opts.tau ** batches,
-                      sum(errors) / max(1, len(errors)))
+        logging.error('%d<%.3g>: error %d', batches, alpha, sum(errors) / max(1, len(errors)))
 
         w, h = pixels.shape
 
@@ -178,13 +181,6 @@ if __name__ == '__main__':
             features[a, b, x:x+w, y:y+h] += c
         [[f.update() for f in fs] for fs in _features]
 
-        # re-allocate new filter arrays if filters have grown too much.
-        width = max(f.shape[0] for f in codebook.filters)
-        height = max(f.shape[0] for f in codebook.filters)
-        if width > 1.1 * filters.shape[2] or height > 1.1 * filters.shape[3]:
-            filters = numpy.zeros((opts.rows, opts.cols, 1.5 * width, 1.5 * height), 'f')
-            _filters = [[glumpy.Image(f, vmin=-0.3, vmax=0.3) for f in fs] for fs in filters]
-
         filters[:] = 0
         for r in range(opts.rows):
             for c in range(opts.cols):
@@ -199,10 +195,7 @@ if __name__ == '__main__':
         for t, pixels in enumerate(devset):
             estimate = trainer.reconstruct(pixels.copy())
             errors.append(abs(pixels - estimate).sum())
-        logging.error('%d<%.3g>: error %d',
-                      batches,
-                      opts.alpha * opts.tau ** batches,
-                      sum(errors) / max(1, len(errors)))
+        logging.error('error %d', sum(errors) / max(1, len(errors)))
 
     @win.event
     def on_draw():
@@ -227,7 +220,7 @@ if __name__ == '__main__':
         if updates != 0:
             updates -= 1
             update()
-            if opts.frames:
+            if opts.save_frames:
                 save_frame(W, H)
 
     @win.event
