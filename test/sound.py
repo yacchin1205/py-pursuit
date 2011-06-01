@@ -69,7 +69,7 @@ def rmse(a, b):
     return '\t%.1f' % (1000 * numpy.linalg.norm(a - b) / numpy.sqrt(len(a)))
 
 
-def evaluate(train, test, width, codebook=10, learning_rate=0.7, max_num_coeffs=100):
+def evaluate(train, test, width, codebook=10, learning_rate=0.3, max_num_coeffs=100):
     print codebook, '\t', width,
 
     def plot(label):
@@ -116,7 +116,7 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.7, max_num_coeffs=
     # continuous
     f = 0
     c = lmj.pursuit.TemporalCodebook(codebook, width)
-    t = lmj.pursuit.TemporalTrainer(c, max_num_coeffs=max_num_coeffs)
+    t = lmj.pursuit.TemporalTrainer(c, max_num_coeffs=max_num_coeffs, min_activity_rank=0.2)
     for _ in range(6):
         t.learn(train, learning_rate)
         f += 1
