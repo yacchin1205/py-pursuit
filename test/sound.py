@@ -116,7 +116,7 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.3, max_num_coeffs=
     # continuous
     f = 0
     c = lmj.pursuit.TemporalCodebook(codebook, width)
-    t = lmj.pursuit.TemporalTrainer(c, max_num_coeffs=max_num_coeffs, min_activity_rank=0.2)
+    t = lmj.pursuit.TemporalTrainer(c, max_num_coeffs=max_num_coeffs, min_activity_ratio=0.2)
     for _ in range(6):
         t.learn(train, learning_rate)
         f += 1
