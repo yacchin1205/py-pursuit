@@ -132,7 +132,7 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.3, max_num_coeffs=
 if __name__ == '__main__':
     logging.basicConfig(
         stream=sys.stderr,
-        level=logging.DEBUG,
+        level=logging.INFO,
         format='%(levelname).1s %(asctime)s %(message)s')
 
     w = rng.randint(int(SAMPLE_RATE * 0.5), int(SAMPLE_RATE * 1.5))
