@@ -49,10 +49,7 @@ try:
     _have_correlate = True
 except ImportError:
     logging.info('cannot import _correlate module, trying scipy')
-    try:
-        import scipy.signal
-    except ImportError:
-        logging.error('O noes ! Cannot import scipy.signal !')
+    import scipy.signal
 
 
 # define a backup correlation function in case the c module isn't present.
@@ -61,15 +58,19 @@ def _default_correlate(s, w, r):
 
 
 def _softmax(a):
-    cdf = numpy.exp(a - a.max()).cumsum()
-    return cdf.searchsorted(rng.uniform(0, cdf[-1]))
+    '''Return the index of the largest value in a, probabilistically.
+    '''
+    a = a.ravel()
+    z = a.max()
 
-def _egreedy(eps=0.1):
-    def choose(a):
-        if rng.random() < eps:
-            return rng.randint(len(a))
-        return a.argmax()
-    return choose
+    # often we're dealing with 1000s of values---lots to search through, with
+    # low probability of choosing the true max. so we limit the values to those
+    # that are at least 70 % of the max. this can cut down by 1000x the values
+    # we have to sum and bisect !
+    mask, = numpy.nonzero(a > 0.7 * z)
+    cdf = numpy.exp(a[mask] - z).cumsum()
+
+    return mask[cdf.searchsorted(rng.uniform(0, cdf[-1]))]
 
 
 class Codebook(object):
@@ -81,9 +82,9 @@ class Codebook(object):
     according to :
 
       x_1 = x
+      x_{n+1} = x_n - c_n * w_n
       w_n = argmax_w <x_n, w>
       c_n = <x_n, w_n>
-      x_{n+1} = x_n - c_n * w_n
 
     This implementation of the algorithm is intended to encode signals of a
     constant shape, using filters of the same shape : 16x16 RGB image patches,
@@ -93,16 +94,12 @@ class Codebook(object):
     learning process for inferring codebook filters from data.
     '''
 
-    def __init__(self, num_filters, filter_shape, choice=None):
+    def __init__(self, num_filters, filter_shape):
         '''Initialize a new codebook of static filters.
 
         num_filters: The number of filters to build in the codebook.
         filter_shape: A tuple of integers that specifies the shape of the
           filters in the codebook.
-        choice: Describes the strategy for choosing coefficients during
-          encoding. Defaults to choosing with a softmax rule. If a
-          floating point is given here, the choice will be made with an egreedy
-          rule with the given value as epsilon. Use 0 to choose using argmax.
         '''
         if not isinstance(filter_shape, (tuple, list)):
             filter_shape = (filter_shape, )
@@ -112,8 +109,6 @@ class Codebook(object):
             w /= numpy.linalg.norm(w)
 
         self._choose = _softmax
-        if isinstance(choice, (float, int)):
-            self._choose = _egreedy(choice)
 
     def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Encode a signal as a sequence of index, coefficient pairs.
@@ -172,7 +167,7 @@ class Codebook(object):
         except TypeError:
             return numpy.zeros_like(self.filters[0])
 
-    def encode_frames(self, frames, min_coeff=0.1):
+    def encode_frames(self, frames, min_coeff=0.):
         '''Encode a sequence of frames.
 
         frames: A (possibly infinite) sequence of data frames to encode.
@@ -250,7 +245,7 @@ class Trainer(object):
 
     def __init__(self, codebook,
                  min_coeff=0., max_num_coeffs=-1,
-                 samples=3, momentum=0., l1=0., l2=0.,
+                 samples=1, momentum=0., l1=0., l2=0.,
                  min_activity_ratio=0.):
         '''Initialize this trainer with some learning parameters.
 
@@ -271,7 +266,7 @@ class Trainer(object):
         '''
         self.codebook = codebook
 
-        self.samples = samples if codebook._choose is _softmax else 1
+        self.samples = samples
 
         self.min_coeff = min_coeff
         self.max_num_coeffs = max_num_coeffs
@@ -293,8 +288,8 @@ class Trainer(object):
         activity = numpy.zeros((len(self.grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
-            for index, coeff in self.codebook.iterencode(
-                    s, self.min_coeff, self.max_num_coeffs):
+            e = self.codebook.iterencode(s, self.min_coeff, self.max_num_coeffs)
+            for index, coeff in e:
                 grad[index] += coeff * s
                 activity[index] += coeff
         return grad, activity
@@ -402,20 +397,16 @@ class TemporalCodebook(Codebook):
     "Efficient Auditory Coding" (Nature).
     '''
 
-    def __init__(self, num_filters, filter_frames, frame_shape=(), choice=None):
+    def __init__(self, num_filters, filter_frames, frame_shape=()):
         '''Initialize a new codebook to a set of random filters.
 
         num_filters: The number of filters to use in our codebook.
         filter_frames: The length (in frames) of filters that we will use for
           our initial codebook.
         frame_shape: The shape of each frame of data that we will encode.
-        choice: A value describing the strategy for choosing coefficients
-          during encoding.
         '''
         super(TemporalCodebook, self).__init__(
-            num_filters,
-            (filter_frames, ) + frame_shape,
-            choice)
+            num_filters, (filter_frames, ) + frame_shape)
 
         self.filters = list(self.filters)
 
@@ -469,7 +460,7 @@ class TemporalCodebook(Codebook):
             a = amplitude - abs(signal[offset:end]).sum()
             signal[offset:end] -= coeff * self.filters[index]
             a += abs(signal[offset:end]).sum()
-            logging.debug('coefficient %.3g, filter %d, offset %d yields amplitude %.3g', coeff, index, offset, a)
+            #logging.debug('coefficient %.3g, filter %d, offset %d yields amplitude %.3g', coeff, index, offset, a)
             if a > amplitude:
                 break
             amplitude = a
@@ -504,7 +495,7 @@ class TemporalTrainer(Trainer):
 
     def __init__(self, codebook,
                  min_coeff=0., max_num_coeffs=-1,
-                 samples=3, momentum=0., l1=0., l2=0.,
+                 samples=1, momentum=0., l1=0., l2=0.,
                  min_activity_ratio=0.,
                  padding=0.1, shrink=0.005, grow=0.05):
         '''Set up the trainer with some static learning parameters.
@@ -553,8 +544,8 @@ class TemporalTrainer(Trainer):
         activity = numpy.zeros((len(grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
-            for index, coeff, offset in self.codebook.iterencode(
-                    s, self.min_coeff, self.max_num_coeffs):
+            e = self.codebook.iterencode(s, self.min_coeff, self.max_num_coeffs)
+            for index, coeff, offset in e:
                 o = len(self.codebook.filters[index])
                 grad[index] += coeff * s[offset:offset + o]
                 activity[index] += coeff
@@ -599,7 +590,7 @@ class TemporalTrainer(Trainer):
 class SpatialCodebook(Codebook):
     '''A matching pursuit for encoding images or other 2D signals.'''
 
-    def __init__(self, num_filters, filter_shape, channels=0, choice=None):
+    def __init__(self, num_filters, filter_shape, channels=0):
         '''Initialize a new codebook of static filters.
 
         num_filters: The number of filters to build in the codebook.
@@ -608,13 +599,9 @@ class SpatialCodebook(Codebook):
         channels: Set this to the number of channels in each element of the
           signal (and the filters). Leave this set to 0 if your 2D signals
           have just two values in their shape tuples.
-        choice: A value describing the strategy for choosing coefficients
-          during encoding.
         '''
         super(SpatialCodebook, self).__init__(
-            num_filters,
-            filter_shape + ((channels, ) if channels else ()),
-            choice)
+            num_filters, filter_shape + ((channels, ) if channels else ()))
 
         self.filters = list(self.filters)
 
@@ -708,7 +695,7 @@ class SpatialTrainer(Trainer):
 
     def __init__(self, codebook,
                  min_coeff=0., max_num_coeffs=-1,
-                 samples=3, momentum=0., l1=0., l2=0.,
+                 samples=1, momentum=0., l1=0., l2=0.,
                  min_activity_ratio=0.,
                  padding=0.1, shrink=0.005, grow=0.05):
         '''Set up the trainer with some static learning parameters.
@@ -757,8 +744,8 @@ class SpatialTrainer(Trainer):
         activity = numpy.zeros((len(grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
-            for index, coeff, (x, y) in self.codebook.iterencode(
-                    s, self.min_coeff, self.max_num_coeffs):
+            e = self.codebook.iterencode(s, self.min_coeff, self.max_num_coeffs)
+            for index, coeff, (x, y) in e:
                 w, h = self.codebook.filters[index].shape[:2]
                 grad[index] += coeff * s[x:x + w, y:y + h]
                 activity[index] += coeff
