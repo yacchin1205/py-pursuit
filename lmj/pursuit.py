@@ -65,9 +65,9 @@ def _softmax(a):
 
     # often we're dealing with 1000s of values---lots to search through, with
     # low probability of choosing the true max. so we limit the values to those
-    # that are at least 70 % of the max. this can cut down by 1000x the values
-    # we have to sum and bisect !
-    mask, = numpy.nonzero(a > 0.7 * z)
+    # that are at least 50 % of the max. this can cut down by several orders of
+    # magnitude the values we have to sum and bisect !
+    mask, = numpy.nonzero(a > 0.5 * z)
     cdf = numpy.exp(a[mask] - z).cumsum()
 
     return mask[cdf.searchsorted(rng.uniform(0, cdf[-1]))]
@@ -245,8 +245,7 @@ class Trainer(object):
 
     def __init__(self, codebook,
                  min_coeff=0., max_num_coeffs=-1,
-                 samples=1, momentum=0., l1=0., l2=0.,
-                 min_activity_ratio=0.):
+                 samples=1, min_activity_ratio=0.):
         '''Initialize this trainer with some learning parameters.
 
         codebook: The matching pursuit codebook to train.
@@ -255,9 +254,6 @@ class Trainer(object):
         max_num_coeffs: Train by encoding signals using this many coefficients.
         samples: The number of encoding samples to draw when approximating the
           gradient.
-        momentum: Use this momentum value during gradient descent.
-        l1: L1-regularize the codebook filters with this weight.
-        l2: L2-regularize the codebook filters with this weight.
         min_activity_ratio: When applying gradients, replace filters whose total
           activity (sum of coefficients) since the last gradient step are below
           this proportion of the median activity for the codebook. This should
@@ -270,10 +266,6 @@ class Trainer(object):
 
         self.min_coeff = min_coeff
         self.max_num_coeffs = max_num_coeffs
-
-        self.momentum = momentum
-        self.l1 = l1
-        self.l2 = l2
 
         self.grad = [numpy.zeros_like(w) for w in self.codebook.filters]
         self.min_activity_ratio = min_activity_ratio
@@ -318,20 +310,21 @@ class Trainer(object):
             # if the activity of this codebook filter is below threshold,
             # replace it with a new noise filter to encourage future usage.
             if a < self.min_activity_ratio * median:
-                self.codebook.filters[i] = std * rng.randn(
+                w = self.codebook.filters[i] = std * rng.randn(
                     *rng.multivariate_normal(mu, numpy.diag(sigma)))
+                w /= numpy.linalg.norm(w)
                 self.grad[i] = numpy.zeros_like(self.codebook.filters[i])
-                continue
 
             if numpy.linalg.norm(g):
                 assert a
-                l1 = numpy.clip(w, -self.l1, self.l1)
-                l2 = self.l2 * w
                 self.grad[i] *= self.momentum
-                self.grad[i] += (1 - self.momentum) * (g / a - l1 - l2)
+                self.grad[i] += (1 - self.momentum) * g / a
                 w += learning_rate * self.grad[i]
 
             self._resize(i)
+
+            w = self.codebook.filters[i]
+            w /= numpy.linalg.norm(w)
 
     def _resize(self, i):
         '''Resize codebook vector i using some energy heuristics.
@@ -495,8 +488,7 @@ class TemporalTrainer(Trainer):
 
     def __init__(self, codebook,
                  min_coeff=0., max_num_coeffs=-1,
-                 samples=1, momentum=0., l1=0., l2=0.,
-                 min_activity_ratio=0.,
+                 samples=1, min_activity_ratio=0.,
                  padding=0.1, shrink=0.005, grow=0.05):
         '''Set up the trainer with some static learning parameters.
 
@@ -506,13 +498,10 @@ class TemporalTrainer(Trainer):
         max_num_coeffs: Train by encoding signals using this many coefficients.
         samples: The number of encoding samples to draw when approximating the
           gradient.
-        momentum: Use this momentum value during gradient descent.
-        l1: L1-regularize the codebook filters with this weight.
-        l2: L2-regularize the codebook filters with this weight.
         min_activity_ratio: When applying gradients, replace filters whose total
           activity (sum of coefficients) since the last gradient step are below
-          this proportion of the median activity for the codebook. This should
-          be a number in [0, 1], where 0 means never replace any filters, and 1
+          this proportion of the median activity for the codebook. This should be
+          a number in [0, 1], where 0 means never replace any filters, and 1
           means replace all filters whose activity is below the median.
         padding: The proportion of each codebook filter to consider as "padding"
           when growing or shrinking. Values around 0.1 are usually good. None
@@ -524,8 +513,8 @@ class TemporalTrainer(Trainer):
         '''
         super(TemporalTrainer, self).__init__(
             codebook=codebook, min_coeff=min_coeff,
-            max_num_coeffs=max_num_coeffs, samples=samples, momentum=momentum,
-            l1=l1, l2=l2, min_activity_ratio=min_activity_ratio)
+            max_num_coeffs=max_num_coeffs,
+            samples=samples, min_activity_ratio=min_activity_ratio)
 
         assert 0 <= padding < 0.5
         assert shrink < grow
@@ -556,21 +545,17 @@ class TemporalTrainer(Trainer):
 
         i: The index of the codebook vector to resize.
         '''
-        w = abs(self.codebook.filters[i])
-
         if not 0 < self.padding < 0.5:
             return
+        w = abs(self.codebook.filters[i])
 
-        p = int(len(w) * self.padding)
-        if not p:
-            return
-
+        p = int(numpy.ceil(len(w) * self.padding))
         pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
         cat = numpy.concatenate
 
         criterion = w[:p].mean()
         #logging.debug('left criterion %.3g', criterion)
-        if criterion < self.shrink:
+        if len(self.codebook.filters[i]) > p and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][p:]
             self.grad[i] = self.grad[i][p:]
         if criterion > self.grow:
@@ -579,7 +564,7 @@ class TemporalTrainer(Trainer):
 
         criterion = w[-p:].mean()
         #logging.debug('right criterion %.3g', criterion)
-        if criterion < self.shrink:
+        if len(self.codebook.filters[i]) > p and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:-p]
             self.grad[i] = self.grad[i][:-p]
         if criterion > self.grow:
@@ -695,8 +680,7 @@ class SpatialTrainer(Trainer):
 
     def __init__(self, codebook,
                  min_coeff=0., max_num_coeffs=-1,
-                 samples=1, momentum=0., l1=0., l2=0.,
-                 min_activity_ratio=0.,
+                 samples=1, min_activity_ratio=0.,
                  padding=0.1, shrink=0.005, grow=0.05):
         '''Set up the trainer with some static learning parameters.
 
@@ -706,9 +690,6 @@ class SpatialTrainer(Trainer):
         max_num_coeffs: Train by encoding signals using this many coefficients.
         samples: The number of encoding samples to draw when approximating the
           gradient.
-        momentum: Use this momentum value during gradient descent.
-        l1: L1-regularize the codebook filters with this weight.
-        l2: L2-regularize the codebook filters with this weight.
         min_activity_ratio: When applying gradients, replace filters whose total
           activity (sum of coefficients) since the last gradient step are below
           this proportion of the median activity for the codebook. This should
@@ -724,8 +705,8 @@ class SpatialTrainer(Trainer):
         '''
         super(SpatialTrainer, self).__init__(
             codebook=codebook, min_coeff=min_coeff,
-            max_num_coeffs=max_num_coeffs, samples=samples, momentum=momentum,
-            l1=l1, l2=l2, min_activity_ratio=min_activity_ratio)
+            max_num_coeffs=max_num_coeffs, samples=samples,
+            min_activity_ratio=min_activity_ratio)
 
         assert 0 <= padding < 0.5
         assert shrink < grow
@@ -756,22 +737,17 @@ class SpatialTrainer(Trainer):
 
         i: The index of the codebook vector to resize.
         '''
-        w = abs(self.codebook.filters[i])
-
         if not 0 < self.padding < 0.5:
             return
+        w = abs(self.codebook.filters[i])
 
-        p = int(w.shape[0] * self.padding)
-        q = int(w.shape[1] * self.padding)
-        if not p or not q:
-            return
-
-        cat = numpy.concatenate
+        p = int(numpy.ceil(w.shape[0] * self.padding))
         pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
+        cat = numpy.concatenate
 
         criterion = w[:p].mean()
         #logging.debug('top criterion %.3g', criterion)
-        if criterion < self.shrink:
+        if len(self.codebook.filters[i]) > p and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][p:]
             self.grad[i] = self.grad[i][p:]
         if criterion > self.grow:
@@ -780,19 +756,20 @@ class SpatialTrainer(Trainer):
 
         criterion = w[-p:].mean()
         #logging.debug('bottom criterion %.3g', criterion)
-        if criterion < self.shrink:
+        if len(self.codebook.filters[i]) > p and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:-p]
             self.grad[i] = self.grad[i][:-p]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
             self.grad[i] = cat([self.grad[i], pad])
 
-        cat = numpy.hstack
+        q = int(numpy.ceil(w.shape[1] * self.padding))
         pad = numpy.zeros((len(self.codebook.filters[i]), q) + w.shape[2:], w.dtype)
+        cat = numpy.hstack
 
         criterion = w[:, :q].mean()
         #logging.debug('left criterion %.3g', criterion)
-        if criterion < self.shrink:
+        if len(self.codebook.filters[i][0]) > q and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:, q:]
             self.grad[i] = self.grad[i][:, q:]
         if criterion > self.grow:
@@ -801,7 +778,7 @@ class SpatialTrainer(Trainer):
 
         criterion = w[:, -q:].mean()
         #logging.debug('right criterion %.3g', criterion)
-        if criterion < self.shrink:
+        if len(self.codebook.filters[i][0]) > q and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:, :-q]
             self.grad[i] = self.grad[i][:, :-q]
         if criterion > self.grow:
