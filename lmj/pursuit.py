@@ -261,13 +261,9 @@ class Trainer(object):
           means replace all filters whose activity is below the median.
         '''
         self.codebook = codebook
-
         self.samples = samples
-
         self.min_coeff = min_coeff
         self.max_num_coeffs = max_num_coeffs
-
-        self.grad = [numpy.zeros_like(w) for w in self.codebook.filters]
         self.min_activity_ratio = min_activity_ratio
 
     def calculate_gradient(self, signal):
@@ -276,8 +272,8 @@ class Trainer(object):
         signal: A signal to use for collecting gradient information. This signal
           will be modified in the course of the gradient collection process.
         '''
-        grad = [numpy.zeros_like(g) for g in self.grad]
-        activity = numpy.zeros((len(self.grad), ), float)
+        grad = [numpy.zeros_like(w) for w in self.codebook.filters]
+        activity = numpy.zeros((len(grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
             e = self.codebook.iterencode(s, self.min_coeff, self.max_num_coeffs)
@@ -301,25 +297,22 @@ class Trainer(object):
         sigma = shapes.std(axis=0)
         std = sum(w.std() for w in self.codebook.filters) / len(activity)
 
-        for i, (g, a) in enumerate(zip(grad, activity)):
+        for i, (grad, act) in enumerate(zip(grad, activity)):
             w = self.codebook.filters[i]
             logging.debug(
                 '%d: norm %.3f, grad %.3f, activity %.3f (vs median %.3f)',
-                i, numpy.linalg.norm(w), numpy.linalg.norm(g), a, median)
+                i, numpy.linalg.norm(w), numpy.linalg.norm(grad), act, median)
 
             # if the activity of this codebook filter is below threshold,
             # replace it with a new noise filter to encourage future usage.
-            if a < self.min_activity_ratio * median:
+            if act < self.min_activity_ratio * median:
                 w = self.codebook.filters[i] = std * rng.randn(
                     *rng.multivariate_normal(mu, numpy.diag(sigma)))
                 w /= numpy.linalg.norm(w)
-                self.grad[i] = numpy.zeros_like(self.codebook.filters[i])
 
-            if numpy.linalg.norm(g):
-                assert a
-                self.grad[i] *= self.momentum
-                self.grad[i] += (1 - self.momentum) * g / a
-                w += learning_rate * self.grad[i]
+            if numpy.linalg.norm(grad):
+                assert act
+                w += learning_rate * grad / act
 
             self._resize(i)
 
@@ -529,7 +522,7 @@ class TemporalTrainer(Trainer):
         signal: A signal to use for collecting gradient information. This signal
           will be modified in the course of the gradient collection process.
         '''
-        grad = [numpy.zeros_like(g) for g in self.grad]
+        grad = [numpy.zeros_like(w) for w in self.codebook.filters]
         activity = numpy.zeros((len(grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
@@ -557,19 +550,15 @@ class TemporalTrainer(Trainer):
         #logging.debug('left criterion %.3g', criterion)
         if len(self.codebook.filters[i]) > p and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][p:]
-            self.grad[i] = self.grad[i][p:]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
-            self.grad[i] = cat([pad, self.grad[i]])
 
         criterion = w[-p:].mean()
         #logging.debug('right criterion %.3g', criterion)
         if len(self.codebook.filters[i]) > p and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:-p]
-            self.grad[i] = self.grad[i][:-p]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
-            self.grad[i] = cat([self.grad[i], pad])
 
 
 class SpatialCodebook(Codebook):
@@ -721,7 +710,7 @@ class SpatialTrainer(Trainer):
         signal: A signal to use for collecting gradient information. This signal
           will be modified in the course of the gradient collection process.
         '''
-        grad = [numpy.zeros_like(g) for g in self.grad]
+        grad = [numpy.zeros_like(w) for w in self.codebook.filters]
         activity = numpy.zeros((len(grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
@@ -749,19 +738,15 @@ class SpatialTrainer(Trainer):
         #logging.debug('top criterion %.3g', criterion)
         if len(self.codebook.filters[i]) > p and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][p:]
-            self.grad[i] = self.grad[i][p:]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
-            self.grad[i] = cat([pad, self.grad[i]])
 
         criterion = w[-p:].mean()
         #logging.debug('bottom criterion %.3g', criterion)
         if len(self.codebook.filters[i]) > p and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:-p]
-            self.grad[i] = self.grad[i][:-p]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
-            self.grad[i] = cat([self.grad[i], pad])
 
         q = int(numpy.ceil(w.shape[1] * self.padding))
         pad = numpy.zeros((len(self.codebook.filters[i]), q) + w.shape[2:], w.dtype)
@@ -771,17 +756,13 @@ class SpatialTrainer(Trainer):
         #logging.debug('left criterion %.3g', criterion)
         if len(self.codebook.filters[i][0]) > q and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:, q:]
-            self.grad[i] = self.grad[i][:, q:]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
-            self.grad[i] = cat([pad, self.grad[i]])
 
         criterion = w[:, -q:].mean()
         #logging.debug('right criterion %.3g', criterion)
         if len(self.codebook.filters[i][0]) > q and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:, :-q]
-            self.grad[i] = self.grad[i][:, :-q]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
-            self.grad[i] = cat([self.grad[i], pad])
 
