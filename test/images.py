@@ -39,12 +39,12 @@ import lmj.pursuit
 FLAGS = optparse.OptionParser()
 FLAGS.add_option('', '--model')
 
-FLAGS.add_option('-c', '--min-coeff', type=float, default=0.0001)
+FLAGS.add_option('-c', '--min-coeff', type=float, default=0.01)
 FLAGS.add_option('-n', '--max-num-coeffs', type=int, default=-1)
 FLAGS.add_option('-a', '--min-activity-ratio', type=float, default=0.)
 
-FLAGS.add_option('-R', '--rows', type=int, default=10)
-FLAGS.add_option('-C', '--cols', type=int, default=10)
+FLAGS.add_option('-R', '--rows', type=int, default=5)
+FLAGS.add_option('-C', '--cols', type=int, default=5)
 
 FLAGS.add_option('', '--learning-rate', type=float, default=0.1)
 FLAGS.add_option('', '--padding', type=float, default=0.1)
@@ -106,10 +106,10 @@ class Simulator(object):
         self.source_image = glumpy.Image(self.source, **kwargs)
         self.reconst_image = glumpy.Image(self.reconst, **kwargs)
         self.filter_images = [
-            [glumpy.Image(f, vmin=-0.2, vmax=0.2) for f in fs]
+            [glumpy.Image(f, vmin=-0.1, vmax=0.1) for f in fs]
             for fs in self.filters]
         self.feature_images = [
-            [glumpy.Image(f, vmin=0, vmax=3) for f in fs]
+            [glumpy.Image(f, vmin=0, vmax=10) for f in fs]
             for fs in self.features]
 
         self.iterator = self.learn_forever()
@@ -122,6 +122,7 @@ class Simulator(object):
         pixels = self.images[rng.randint(len(self.images))].copy()
         w, h = pixels.shape
         self.source[:w, :h] += pixels
+        self.source_image.update()
 
         grad = [numpy.zeros_like(w) for w in self.codebook.filters]
         activity = numpy.zeros((len(grad), ), float)
@@ -173,9 +174,7 @@ class Simulator(object):
             logging.error('error %d', sum(self.errors) / max(1, len(self.errors)))
 
     def draw(self, W, H, p=4):
-        self.source_image.update()
         self.reconst_image.update()
-
         [[f.update() for f in fs] for fs in self.feature_images]
 
         w = int(float(W - p) / (2 * self.opts.cols))
@@ -219,7 +218,11 @@ if __name__ == '__main__':
         win.draw()
         if sim.updates != 0:
             sim.updates -= 1
-            next(sim.iterator)
+            try:
+                next(sim.iterator)
+            except:
+                logging.exception('error while training !')
+                sys.exit()
             if opts.save_frames:
                 save_frame(*win.get_size())
 
