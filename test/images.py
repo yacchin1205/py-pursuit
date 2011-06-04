@@ -42,14 +42,11 @@ FLAGS.add_option('', '--model')
 FLAGS.add_option('-c', '--min-coeff', type=float, default=0.01)
 FLAGS.add_option('-n', '--max-num-coeffs', type=int, default=-1)
 FLAGS.add_option('-a', '--min-activity-ratio', type=float, default=0.)
-
-FLAGS.add_option('-R', '--rows', type=int, default=5)
-FLAGS.add_option('-C', '--cols', type=int, default=5)
-
+FLAGS.add_option('-f', '--filters', type=int, default=6)
 FLAGS.add_option('', '--learning-rate', type=float, default=0.1)
 FLAGS.add_option('', '--padding', type=float, default=0.1)
-FLAGS.add_option('', '--grow', type=float, default=0.01)
-FLAGS.add_option('', '--shrink', type=float, default=0.0001)
+FLAGS.add_option('', '--grow', type=float, default=0.03)
+FLAGS.add_option('', '--shrink', type=float, default=0.003)
 
 FLAGS.add_option('-s', '--save-frames', action='store_true')
 
@@ -59,7 +56,7 @@ def now():
 
 
 def load_image(path):
-    return (numpy.asarray(Image.open(path).convert('L')) - 128.) / 256.
+    return (numpy.asarray(Image.open(path).convert('L')) - 128.) / 128.
 
 
 def save_frame(width, height):
@@ -83,13 +80,12 @@ class Simulator(object):
         self.images = [load_image(arg) for arg in args]
 
         self.codebook = lmj.pursuit.SpatialCodebook(
-            opts.rows * opts.cols, (20, 20))
+            opts.filters * opts.filters, (20, 20))
 
         self.trainer = lmj.pursuit.SpatialTrainer(
             self.codebook,
             min_coeff=opts.min_coeff,
             max_num_coeffs=opts.max_num_coeffs,
-            min_activity_ratio=opts.min_activity_ratio,
             padding=opts.padding,
             grow=opts.grow,
             shrink=opts.shrink,
@@ -99,17 +95,17 @@ class Simulator(object):
         h = max(x.shape[1] for x in self.images)
         self.source = numpy.zeros((w, h), 'f')
         self.reconst = numpy.zeros((w, h), 'f')
-        self.filters = numpy.zeros((opts.rows, opts.cols, 20, 20), 'f')
-        self.features = numpy.zeros((opts.rows, opts.cols, w, h), 'f')
+        self.filters = numpy.zeros((opts.filters, opts.filters, 20, 20), 'f')
+        self.features = numpy.zeros((opts.filters, opts.filters, w, h), 'f')
 
-        kwargs = dict(cmap=glumpy.colormap.Grey, vmin=-0.5, vmax=0.5)
+        kwargs = dict(cmap=glumpy.colormap.Grey, vmin=-1, vmax=1, interpolation='bicubic')
         self.source_image = glumpy.Image(self.source, **kwargs)
         self.reconst_image = glumpy.Image(self.reconst, **kwargs)
         self.filter_images = [
-            [glumpy.Image(f, vmin=-0.1, vmax=0.1) for f in fs]
+            [glumpy.Image(f, vmin=-0.1, vmax=0.1, interpolation='bicubic') for f in fs]
             for fs in self.filters]
         self.feature_images = [
-            [glumpy.Image(f, vmin=0, vmax=10) for f in fs]
+            [glumpy.Image(f, vmin=0, vmax=50) for f in fs]
             for fs in self.features]
 
         self.iterator = self.learn_forever()
@@ -122,75 +118,75 @@ class Simulator(object):
         pixels = self.images[rng.randint(len(self.images))].copy()
         w, h = pixels.shape
         self.source[:w, :h] += pixels
-        self.source_image.update()
 
         grad = [numpy.zeros_like(w) for w in self.codebook.filters]
         activity = numpy.zeros((len(grad), ), float)
-
         for index, coeff, (x, y) in self.codebook.iterencode(
                 pixels,
                 self.opts.min_coeff,
                 self.opts.max_num_coeffs):
+            a, b = numpy.unravel_index(index, (opts.filters, opts.filters))
             w, h = self.codebook.filters[index].shape[:2]
-
             grad[index] += coeff * pixels[x:x+w, y:y+h]
             activity[index] += coeff
-
-            a, b = numpy.unravel_index(index, (opts.rows, opts.cols))
             self.features[a, b, x:x+w, y:y+h] += coeff
-
             self.reconst[x:x+w, y:y+h] += coeff * self.codebook.filters[index]
-
             yield
 
-        self.trainer.apply_gradient(grad, activity, self.opts.learning_rate)
+        self.trainer.apply_gradient(
+            grad,
+            activity,
+            self.opts.learning_rate,
+            self.opts.min_activity_ratio)
 
+    def refresh_filters(self):
         w = max(w.shape[0] for w in self.codebook.filters)
         h = max(w.shape[1] for w in self.codebook.filters)
 
         if w > self.filters.shape[2] or h > self.filters.shape[3]:
             x = max(w * 1.5, h * 1.5)
-            self.filters = numpy.zeros((self.opts.rows, self.opts.cols, x, x), 'f')
+            self.filters = numpy.zeros((self.opts.filters, self.opts.filters, x, x), 'f')
             self.filter_images = [
                 [glumpy.Image(f, vmin=-0.2, vmax=0.2) for f in fs]
                 for fs in self.filters]
 
         self.filters[:] = 0.
-        for r in range(self.opts.rows):
-            for c in range(self.opts.cols):
-                f = self.codebook.filters[r * self.opts.cols + c]
+        for r in range(self.opts.filters):
+            for c in range(self.opts.filters):
+                f = self.codebook.filters[r * self.opts.filters + c]
                 x, y = f.shape
                 a = (self.filters.shape[2] - x) // 2
                 b = (self.filters.shape[3] - y) // 2
                 self.filters[r, c, a:a+x, b:b+y] += f
 
-        [[f.update() for f in fs] for fs in self.filter_images]
-
     def learn_forever(self):
         while True:
+            self.refresh_filters()
             for _ in self.learn():
                 yield
             self.errors.append(abs(self.source - self.reconst).sum())
             logging.error('error %d', sum(self.errors) / max(1, len(self.errors)))
 
     def draw(self, W, H, p=4):
+        self.source_image.update()
         self.reconst_image.update()
         [[f.update() for f in fs] for fs in self.feature_images]
+        [[f.update() for f in fs] for fs in self.filter_images]
 
-        w = int(float(W - p) / (2 * self.opts.cols))
-        h = int(float(H - p) / (2 * self.opts.rows))
+        w = int(float(W - p) / (2 * self.opts.filters))
+        h = int(float(H - p) / (2 * self.opts.filters))
         self.source_image.blit(
-            p, h * self.opts.rows + p, w * self.opts.cols - p, h * self.opts.rows - p)
-        self.reconst_image.blit(w * self.opts.cols + p,
-                                h * self.opts.rows + p,
-                                w * self.opts.cols - p,
-                                h * self.opts.rows - p)
-        for r in range(self.opts.rows):
+            p, h * self.opts.filters + p, w * self.opts.filters - p, h * self.opts.filters - p)
+        self.reconst_image.blit(w * self.opts.filters + p,
+                                h * self.opts.filters + p,
+                                w * self.opts.filters - p,
+                                h * self.opts.filters - p)
+        for r in range(self.opts.filters):
             fs = self.filter_images[r]
             Fs = self.feature_images[r]
-            for c in range(self.opts.cols):
+            for c in range(self.opts.filters):
                 fs[c].blit(w * c + p, h * r + p, w - p, h - p)
-                Fs[c].blit(w * (c + self.opts.cols) + p, h * r + p, w - p, h - p)
+                Fs[c].blit(w * (c + self.opts.filters) + p, h * r + p, w - p, h - p)
 
 
 if __name__ == '__main__':
