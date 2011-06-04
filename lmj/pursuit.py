@@ -243,9 +243,7 @@ class Codebook(object):
 class Trainer(object):
     '''Train the codebook filters in a matching pursuit encoder.'''
 
-    def __init__(self, codebook,
-                 min_coeff=0., max_num_coeffs=-1,
-                 samples=1, min_activity_ratio=0.):
+    def __init__(self, codebook, min_coeff=0., max_num_coeffs=-1, samples=1):
         '''Initialize this trainer with some learning parameters.
 
         codebook: The matching pursuit codebook to train.
@@ -254,17 +252,11 @@ class Trainer(object):
         max_num_coeffs: Train by encoding signals using this many coefficients.
         samples: The number of encoding samples to draw when approximating the
           gradient.
-        min_activity_ratio: When applying gradients, replace filters whose total
-          activity (sum of coefficients) since the last gradient step are below
-          this proportion of the median activity for the codebook. This should
-          be a number in [0, 1], where 0 means never replace any filters, and 1
-          means replace all filters whose activity is below the median.
         '''
         self.codebook = codebook
-        self.samples = samples
         self.min_coeff = min_coeff
         self.max_num_coeffs = max_num_coeffs
-        self.min_activity_ratio = min_activity_ratio
+        self.samples = samples
 
     def calculate_gradient(self, signal):
         '''Calculate a gradient from a signal.
@@ -282,20 +274,23 @@ class Trainer(object):
                 activity[index] += coeff
         return grad, activity
 
-    def apply_gradient(self, grad, activity, learning_rate):
+    def apply_gradient(self, grad, activity, learning_rate, min_activity_ratio=0.):
         '''Apply gradients to the codebook filters.
 
         grad: A sequence of gradients to apply to the codebook filters.
         activity: A sequence of scalars indicating how active each codebook
           filter was during gradient calculation.
         learning_rate: Move the codebook filters this much toward the gradients.
+        min_activity_ratio: Replace filters with total activity below this
+          proportion of the median activity for the codebook. This should be a
+          number in [0, 1], where 0 means never replace any filters, and 1 means
+          replace all filters whose activity is below the median.
         '''
         median = numpy.sort(activity)[len(activity) // 2]
 
         shapes = numpy.array([w.shape for w in self.codebook.filters])
         mu = shapes.mean(axis=0)
         sigma = shapes.std(axis=0)
-        std = sum(w.std() for w in self.codebook.filters) / len(activity)
 
         for i, (grad, act) in enumerate(zip(grad, activity)):
             w = self.codebook.filters[i]
@@ -305,16 +300,13 @@ class Trainer(object):
 
             # if the activity of this codebook filter is below threshold,
             # replace it with a new noise filter to encourage future usage.
-            if act < self.min_activity_ratio * median:
-                w = self.codebook.filters[i] = std * rng.randn(
-                    *rng.multivariate_normal(mu, numpy.diag(sigma)))
-                w /= numpy.linalg.norm(w)
-
-            if numpy.linalg.norm(grad):
-                assert act
+            if act < min_activity_ratio * median:
+                shape = rng.multivariate_normal(mu, numpy.diag(sigma))
+                self.codebook.filters[i] = rng.randn(*shape)
+            elif act > 0:
                 w += learning_rate * grad / act
-
-            self._resize(i)
+                w /= numpy.linalg.norm(w)
+                self._resize(i)
 
             w = self.codebook.filters[i]
             w /= numpy.linalg.norm(w)
@@ -328,15 +320,19 @@ class Trainer(object):
         '''
         return
 
-    def learn(self, signal, learning_rate):
+    def learn(self, signal, learning_rate, min_activity_ratio=0.):
         '''Calculate and apply a gradient from the given signal.
 
         signal: A signal to use for collecting gradient information. This signal
           will not be modified.
         learning_rate: Move the codebook filters this much toward the gradients.
+        min_activity_ratio: Replace filters with total activity below this
+          proportion of the median activity for the codebook. This should be a
+          number in [0, 1], where 0 means never replace any filters, and 1 means
+          replace all filters whose activity is below the median.
         '''
         grad, activity = self.calculate_gradient(signal.copy())
-        self.apply_gradient(grad, activity, learning_rate)
+        self.apply_gradient(grad, activity, learning_rate, min_activity_ratio)
 
     def reconstruct(self, signal):
         '''Reconstruct the given signal using our pursuit codebook.
@@ -479,9 +475,7 @@ class TemporalCodebook(Codebook):
 class TemporalTrainer(Trainer):
     '''Train a set of temporal codebook filters using signal data.'''
 
-    def __init__(self, codebook,
-                 min_coeff=0., max_num_coeffs=-1,
-                 samples=1, min_activity_ratio=0.,
+    def __init__(self, codebook, min_coeff=0., max_num_coeffs=-1, samples=1,
                  padding=0.1, shrink=0.005, grow=0.05):
         '''Set up the trainer with some static learning parameters.
 
@@ -491,11 +485,6 @@ class TemporalTrainer(Trainer):
         max_num_coeffs: Train by encoding signals using this many coefficients.
         samples: The number of encoding samples to draw when approximating the
           gradient.
-        min_activity_ratio: When applying gradients, replace filters whose total
-          activity (sum of coefficients) since the last gradient step are below
-          this proportion of the median activity for the codebook. This should be
-          a number in [0, 1], where 0 means never replace any filters, and 1
-          means replace all filters whose activity is below the median.
         padding: The proportion of each codebook filter to consider as "padding"
           when growing or shrinking. Values around 0.1 are usually good. None
           disables growing or shrinking of the codebook filters.
@@ -505,9 +494,7 @@ class TemporalTrainer(Trainer):
           exceeds this threshold.
         '''
         super(TemporalTrainer, self).__init__(
-            codebook=codebook, min_coeff=min_coeff,
-            max_num_coeffs=max_num_coeffs,
-            samples=samples, min_activity_ratio=min_activity_ratio)
+            codebook, min_coeff, max_num_coeffs, samples)
 
         assert 0 <= padding < 0.5
         assert shrink < grow
@@ -548,14 +535,14 @@ class TemporalTrainer(Trainer):
 
         criterion = w[:p].mean()
         #logging.debug('left criterion %.3g', criterion)
-        if len(self.codebook.filters[i]) > p and criterion < self.shrink:
+        if len(self.codebook.filters[i]) > 1 + p and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][p:]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
 
         criterion = w[-p:].mean()
         #logging.debug('right criterion %.3g', criterion)
-        if len(self.codebook.filters[i]) > p and criterion < self.shrink:
+        if len(self.codebook.filters[i]) > 1 + p and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:-p]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
@@ -667,9 +654,7 @@ class SpatialCodebook(Codebook):
 class SpatialTrainer(Trainer):
     '''Train a set of spatial codebook filters using signal data.'''
 
-    def __init__(self, codebook,
-                 min_coeff=0., max_num_coeffs=-1,
-                 samples=1, min_activity_ratio=0.,
+    def __init__(self, codebook, min_coeff=0., max_num_coeffs=-1, samples=1,
                  padding=0.1, shrink=0.005, grow=0.05):
         '''Set up the trainer with some static learning parameters.
 
@@ -679,11 +664,6 @@ class SpatialTrainer(Trainer):
         max_num_coeffs: Train by encoding signals using this many coefficients.
         samples: The number of encoding samples to draw when approximating the
           gradient.
-        min_activity_ratio: When applying gradients, replace filters whose total
-          activity (sum of coefficients) since the last gradient step are below
-          this proportion of the median activity for the codebook. This should
-          be a number in [0, 1], where 0 means never replace any filters, and 1
-          means replace all filters whose activity is below the median.
         padding: The proportion of each codebook filter to consider as "padding"
           when growing or shrinking. Values around 0.1 are usually good. None
           disables growing or shrinking of the codebook filters.
@@ -693,9 +673,7 @@ class SpatialTrainer(Trainer):
           exceeds this threshold.
         '''
         super(SpatialTrainer, self).__init__(
-            codebook=codebook, min_coeff=min_coeff,
-            max_num_coeffs=max_num_coeffs, samples=samples,
-            min_activity_ratio=min_activity_ratio)
+            codebook, min_coeff, max_num_coeffs, samples)
 
         assert 0 <= padding < 0.5
         assert shrink < grow
@@ -736,14 +714,14 @@ class SpatialTrainer(Trainer):
 
         criterion = w[:p].mean()
         #logging.debug('top criterion %.3g', criterion)
-        if len(self.codebook.filters[i]) > p and criterion < self.shrink:
+        if len(self.codebook.filters[i]) > 1 + p and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][p:]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
 
         criterion = w[-p:].mean()
         #logging.debug('bottom criterion %.3g', criterion)
-        if len(self.codebook.filters[i]) > p and criterion < self.shrink:
+        if len(self.codebook.filters[i]) > 1 + p and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:-p]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
@@ -754,15 +732,14 @@ class SpatialTrainer(Trainer):
 
         criterion = w[:, :q].mean()
         #logging.debug('left criterion %.3g', criterion)
-        if len(self.codebook.filters[i][0]) > q and criterion < self.shrink:
+        if len(self.codebook.filters[i][0]) > 1 + q and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:, q:]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
 
         criterion = w[:, -q:].mean()
         #logging.debug('right criterion %.3g', criterion)
-        if len(self.codebook.filters[i][0]) > q and criterion < self.shrink:
+        if len(self.codebook.filters[i][0]) > 1 + q and criterion < self.shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:, :-q]
         if criterion > self.grow:
             self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
-
