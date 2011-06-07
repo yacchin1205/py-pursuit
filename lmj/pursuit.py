@@ -54,20 +54,25 @@ except ImportError:
 
 # define a backup correlation function in case the c module isn't present.
 def _default_correlate(s, w, r):
+    '''Assign to r the values from scipy.signal.correlate(s, w).'''
     r[:] = scipy.signal.correlate(s, w, 'valid')
 
 
-def _softmax(a):
-    '''Return the index of the largest value in a, probabilistically.
-    '''
+def argmax(a):
+    '''Return the index of the largest value in a.'''
+    return a.argmax()
+
+
+def softmax(a):
+    '''Return the index of the largest value in a, probabilistically.'''
     a = a.ravel()
     z = a.max()
 
     # often we're dealing with 1000s of values---lots to search through, with
     # low probability of choosing the true max. so we limit the values to those
-    # that are at least 50 % of the max. this can cut down by several orders of
-    # magnitude the values we have to sum and bisect !
-    mask, = numpy.nonzero(a > 0.5 * z)
+    # that are at least 10 % of the max. this can massively reduce the number of
+    # values we have to sum and bisect !
+    mask, = numpy.nonzero(a > 0.1 * z)
     cdf = numpy.exp(a[mask] - z).cumsum()
 
     return mask[cdf.searchsorted(rng.uniform(0, cdf[-1]))]
@@ -108,9 +113,7 @@ class Codebook(object):
         for w in self.filters:
             w /= numpy.linalg.norm(w)
 
-        self._choose = _softmax
-
-    def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
+    def encode(self, signal, min_coeff=0., max_num_coeffs=-1, choose=softmax):
         '''Encode a signal as a sequence of index, coefficient pairs.
 
         signal: A numpy array containing a signal to encode. The values in the
@@ -119,6 +122,11 @@ class Codebook(object):
           this threshold.
         max_num_coeffs: Stop encoding when this many filters have been used in
           the encoding.
+        choose: A callable that takes a numpy array and returns an index into
+          the flattened array. This callable is used to pick each of the
+          filters to be used during encoding. The default is to choose using a
+          softmax rule (the probability of choosing a filter is proportional to
+          its activation), but the greedy encoding strategy uses argmax.
 
         Generates a sequence of (index, coefficient) tuples.
         '''
@@ -126,9 +134,11 @@ class Codebook(object):
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
 
-            index = self._choose(coeffs)
+            index = choose(coeffs)
             coeff = coeffs[index]
             if coeff < min_coeff:
+                logging.debug(
+                    'halting: coefficient %.2f < %.2f', coeff, min_coeff)
                 break
 
             signal -= coeff * self.filters[index]
@@ -138,21 +148,6 @@ class Codebook(object):
             coeffs[mask] = [(signal * w).sum() for w in self.filters[mask]]
 
             yield index, coeff
-
-    def encode(self, signal, min_coeff=0., max_num_coeffs=-1):
-        '''Encode a signal using our dictionary of codebook filters.
-
-        signal: A numpy array to encode. This signal must be the same shape as
-          the filters in our codebook. The values in the signal array will be
-          modified.
-        min_coeff: Stop encoding when the maximal filter response drops below
-          this threshold.
-        max_num_coeffs: Stop encoding when this many filters have been used in
-          the encoding.
-
-        Returns a tuple of (index, coefficient) tuples.
-        '''
-        return tuple(self.iterencode(signal, min_coeff, max_num_coeffs))
 
     def decode(self, encoding, unused_shape):
         '''Decode an encoding of a static signal.
@@ -167,11 +162,16 @@ class Codebook(object):
         except TypeError:
             return numpy.zeros_like(self.filters[0])
 
-    def encode_frames(self, frames, min_coeff=0.):
+    def encode_frames(self, frames, min_coeff=0., choose=softmax):
         '''Encode a sequence of frames.
 
         frames: A (possibly infinite) sequence of data frames to encode.
         min_coeff: Only fire for filters that exceed this threshold.
+        choose: A callable that takes a numpy array and returns an index into
+          the flattened array. This callable is used to pick each of the
+          filters to be used during encoding. The default is to choose using a
+          softmax rule (the probability of choosing a filter is proportional to
+          its activation), but the greedy encoding strategy uses argmax.
 
         Generates a sequence of ((index, coeff), ...) tuples at the same rate as
         the input frames. If a given input frame does not yield a filter
@@ -206,9 +206,11 @@ class Codebook(object):
                 [(window[:len(w)] * w).sum() for w in self.filters])
             encoding = []
             while True:
-                index = self._choose(coeffs)
+                index = choose(coeffs)
                 coeff = coeffs[index]
                 if coeff < min_coeff:
+                    logging.debug(
+                        'halting: coefficient %.2f < %.2f', coeff, min_coeff)
                     break
                 encoding.append((index, coeff))
                 w = self.filters[index]
@@ -243,7 +245,8 @@ class Codebook(object):
 class Trainer(object):
     '''Train the codebook filters in a matching pursuit encoder.'''
 
-    def __init__(self, codebook, min_coeff=0., max_num_coeffs=-1, samples=1):
+    def __init__(self, codebook, min_coeff=0., max_num_coeffs=-1, samples=1,
+                 choose=softmax):
         '''Initialize this trainer with some learning parameters.
 
         codebook: The matching pursuit codebook to train.
@@ -257,94 +260,138 @@ class Trainer(object):
         self.min_coeff = min_coeff
         self.max_num_coeffs = max_num_coeffs
         self.samples = samples
+        self.choose = choose
 
     def calculate_gradient(self, signal):
         '''Calculate a gradient from a signal.
 
         signal: A signal to use for collecting gradient information. This signal
           will be modified in the course of the gradient collection process.
+
+        Returns a pair of (gradient, activity), where activity is the sum of the
+        coefficients for each codebook filter.
         '''
         grad = [numpy.zeros_like(w) for w in self.codebook.filters]
         activity = numpy.zeros((len(grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
-            e = self.codebook.iterencode(s, self.min_coeff, self.max_num_coeffs)
-            for index, coeff in e:
-                grad[index] += coeff * s
-                activity[index] += coeff
+            encoding = self.codebook.encode(
+                s, self.min_coeff, self.max_num_coeffs, self.choose)
+            self._calculate_gradient(s, encoding, grad, activity)
         return grad, activity
 
-    def apply_gradient(self, grad, activity, learning_rate, min_activity_ratio=0.):
+    def _calculate_gradient(self, signal, encoding, grad, activty):
+        '''Calculate the gradient from one encoding of a signal.'''
+        for index, coeff in encoding:
+            grad[index] += coeff * signal
+            activity[index] += coeff
+
+    def apply_gradient(self, grad, learning_rate):
         '''Apply gradients to the codebook filters.
 
         grad: A sequence of gradients to apply to the codebook filters.
+        learning_rate: Move the codebook filters this much toward the gradients.
+        '''
+        for i, g in enumerate(grad):
+            logging.debug('filter %d: |gradient| %.2f', i, numpy.linalg.norm(g))
+            w = self.codebook.filters[i]
+            w += learning_rate * g
+            w /= numpy.linalg.norm(w)
+
+    def resample(self, activity, min_activity_ratio=0.1):
+        '''Create new filters to replace "inactive" ones.
+
+        For a given codebook filter, if the activity for that  filter is below
+        a specific threshold, we replace it with a new noise filter to encourage
+        future usage.
+
         activity: A sequence of scalars indicating how active each codebook
           filter was during gradient calculation.
-        learning_rate: Move the codebook filters this much toward the gradients.
         min_activity_ratio: Replace filters with total activity below this
           proportion of the median activity for the codebook. This should be a
           number in [0, 1], where 0 means never replace any filters, and 1 means
           replace all filters whose activity is below the median.
         '''
         median = numpy.sort(activity)[len(activity) // 2]
+        logging.debug('median filter activity: %.1f', median)
+        min_act = min_activity_ratio * median
 
         shapes = numpy.array([w.shape for w in self.codebook.filters])
         mu = shapes.mean(axis=0)
         sigma = shapes.std(axis=0)
 
-        for i, (grad, act) in enumerate(zip(grad, activity)):
-            w = self.codebook.filters[i]
-            logging.debug(
-                '%d: norm %.3f, grad %.3f, activity %.3f (vs median %.3f)',
-                i, numpy.linalg.norm(w), numpy.linalg.norm(grad), act, median)
-
-            # if the activity of this codebook filter is below threshold,
-            # replace it with a new noise filter to encourage future usage.
-            if act < min_activity_ratio * median:
+        for i, act in enumerate(activity):
+            logging.debug('filter %d: activity %.1f', i, act)
+            if act < min_act:
                 shape = rng.multivariate_normal(mu, numpy.diag(sigma))
-                self.codebook.filters[i] = rng.randn(*shape)
-            elif act > 0:
-                w += learning_rate * grad / act
+                w = self.codebook.filters[i] = rng.randn(*shape)
                 w /= numpy.linalg.norm(w)
-                self._resize(i)
 
+    def resize(self, padding, shrink, grow):
+        '''Resize the filters in our codebook.
+
+        padding: The proportion of each codebook filter to consider as "padding"
+          when growing or shrinking. Values around 0.1 are usually good. 0
+          disables growing or shrinking of the codebook filters.
+        shrink: Remove the padding from a codebook filter when the signal in the
+          padding falls below this threshold.
+        grow: Add padding to a codebook filter when signal in the padding
+          exceeds this threshold.
+        '''
+        if not 0 < padding < 0.5:
+            return
+        for i in range(len(self.codebook.filters)):
+            self._resize(i, padding, shrink, grow)
             w = self.codebook.filters[i]
             w /= numpy.linalg.norm(w)
 
-    def _resize(self, i):
+    def _resize(self, i, padding, shrink, grow):
         '''Resize codebook vector i using some energy heuristics.
 
         i: The index of the codebook vector to resize.
+        padding: The proportion of each codebook filter to consider as "padding"
+          when growing or shrinking. Values around 0.1 are usually good. 0
+          disables growing or shrinking of the codebook filters.
+        shrink: Remove the padding from a codebook filter when the signal in the
+          padding falls below this threshold.
+        grow: Add padding to a codebook filter when signal in the padding
+          exceeds this threshold.
 
         This function is a no-op for the Trainer class.
         '''
         return
 
-    def learn(self, signal, learning_rate, min_activity_ratio=0.):
+    def learn(self, signal, learning_rate):
         '''Calculate and apply a gradient from the given signal.
 
         signal: A signal to use for collecting gradient information. This signal
           will not be modified.
         learning_rate: Move the codebook filters this much toward the gradients.
-        min_activity_ratio: Replace filters with total activity below this
-          proportion of the median activity for the codebook. This should be a
-          number in [0, 1], where 0 means never replace any filters, and 1 means
-          replace all filters whose activity is below the median.
+
+        Returns the result from the call to calculate_gradient().
         '''
         grad, activity = self.calculate_gradient(signal.copy())
-        self.apply_gradient(grad, activity, learning_rate, min_activity_ratio)
+        self.apply_gradient(
+            (g / (a or 1) for g, a in zip(grad, activity)), learning_rate)
+        return grad, activity
 
-    def reconstruct(self, signal):
+    def reconstruct(self, signal, choose=argmax):
         '''Reconstruct the given signal using our pursuit codebook.
 
         signal: A signal to encode and then reconstruct. This signal will not
           be modified.
+        choose: A callable that takes a numpy array and returns an index into
+          the flattened array. This callable is used to pick each of the
+          filters to be used during encoding. We do reconstruction using argmax
+          by default.
 
         Returns a numpy array with the same shape as the original signal,
         containing reconstructed values instead of the original values.
         '''
-        return self.codebook.decode(self.codebook.iterencode(
-            signal.copy(), self.min_coeff, self.max_num_coeffs), signal.shape)
+        return self.codebook.decode(
+            self.codebook.encode(
+                signal.copy(), self.min_coeff, self.max_num_coeffs, choose),
+            signal.shape)
 
 
 class TemporalCodebook(Codebook):
@@ -398,7 +445,7 @@ class TemporalCodebook(Codebook):
         if _have_correlate and len(frame_shape) == 1:
             self._correlate = _correlate.correlate1d_from_2d
 
-    def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
+    def encode(self, signal, min_coeff=0., max_num_coeffs=-1, choose=softmax):
         '''Generate a set of codebook coefficients for encoding a signal.
 
         signal: A signal to encode.
@@ -407,6 +454,11 @@ class TemporalCodebook(Codebook):
         max_num_coeffs: Stop encoding when we have generated this many
           coefficients. Use a negative value to encode until min_coeff is
           reached.
+        choose: A callable that takes a numpy array and returns an index into
+          the flattened array. This callable is used to pick each of the
+          filters to be used during encoding. The default is to choose using a
+          softmax rule (the probability of choosing a filter is proportional to
+          its activation), but the greedy encoding strategy uses argmax.
 
         This method generates a sequence of tuples of the form (index,
         coefficient, offset), where index refers to a codebook filter and
@@ -431,19 +483,25 @@ class TemporalCodebook(Codebook):
             max_num_coeffs -= 1
 
             # find the largest coefficient, check that it's large enough.
-            index, offset = numpy.unravel_index(self._choose(scores), scores.shape)
+            index, offset = numpy.unravel_index(choose(scores), scores.shape)
             coeff = scores[index, offset]
             length = lengths[index]
             end = offset + length
             if coeff < min_coeff:
+                logging.debug(
+                    'halting: coefficient %.2f < %.2f', coeff, min_coeff)
                 break
 
-            # check that using this filter does not increase signal amplitude.
+            # check that using this filter does not increase signal amplitude by
+            # more than 1 %.
             a = amplitude - abs(signal[offset:end]).sum()
             signal[offset:end] -= coeff * self.filters[index]
             a += abs(signal[offset:end]).sum()
-            #logging.debug('coefficient %.3g, filter %d, offset %d yields amplitude %.3g', coeff, index, offset, a)
-            if a > amplitude:
+            #logging.debug('coefficient %.2f, filter %d, offset %d yields amplitude %.2f', coeff, index, offset, a)
+            if a > 1.01 * amplitude:
+                logging.debug('halting: coefficient %.2f, filter %d, '
+                              'offset %d yields amplitude %.2f > 1.01 * %.2f',
+                              coeff, index, offset, a, amplitude)
                 break
             amplitude = a
 
@@ -475,76 +533,43 @@ class TemporalCodebook(Codebook):
 class TemporalTrainer(Trainer):
     '''Train a set of temporal codebook filters using signal data.'''
 
-    def __init__(self, codebook, min_coeff=0., max_num_coeffs=-1, samples=1,
-                 padding=0.1, shrink=0.005, grow=0.05):
-        '''Set up the trainer with some static learning parameters.
+    def _calculate_gradient(self, signal, encoding, grad, activity):
+        '''Calculate the gradient from one encoding of a signal.'''
+        for index, coeff, offset in encoding:
+            o = len(self.codebook.filters[index])
+            grad[index] += coeff * s[offset:offset + o]
+            activity[index] += coeff
 
-        codebook: The matching pursuit codebook to train.
-        min_coeff: Train by encoding signals to this minimum coefficient
-          value.
-        max_num_coeffs: Train by encoding signals using this many coefficients.
-        samples: The number of encoding samples to draw when approximating the
-          gradient.
+    def _resize(self, i, padding, shrink, grow):
+        '''Resize codebook vector i using some energy heuristics.
+
+        i: The index of the codebook vector to resize.
         padding: The proportion of each codebook filter to consider as "padding"
-          when growing or shrinking. Values around 0.1 are usually good. None
+          when growing or shrinking. Values around 0.1 are usually good. 0
           disables growing or shrinking of the codebook filters.
         shrink: Remove the padding from a codebook filter when the signal in the
           padding falls below this threshold.
         grow: Add padding to a codebook filter when signal in the padding
           exceeds this threshold.
         '''
-        super(TemporalTrainer, self).__init__(
-            codebook, min_coeff, max_num_coeffs, samples)
-
-        assert 0 <= padding < 0.5
-        assert shrink < grow
-
-        self.padding = padding
-        self.shrink = shrink
-        self.grow = grow
-
-    def calculate_gradient(self, signal):
-        '''Calculate a gradient from a signal.
-
-        signal: A signal to use for collecting gradient information. This signal
-          will be modified in the course of the gradient collection process.
-        '''
-        grad = [numpy.zeros_like(w) for w in self.codebook.filters]
-        activity = numpy.zeros((len(grad), ), float)
-        for _ in range(self.samples):
-            s = signal.copy()
-            e = self.codebook.iterencode(s, self.min_coeff, self.max_num_coeffs)
-            for index, coeff, offset in e:
-                o = len(self.codebook.filters[index])
-                grad[index] += coeff * s[offset:offset + o]
-                activity[index] += coeff
-        return grad, activity
-
-    def _resize(self, i):
-        '''Resize codebook vector i using some energy heuristics.
-
-        i: The index of the codebook vector to resize.
-        '''
-        if not 0 < self.padding < 0.5:
-            return
         w = abs(self.codebook.filters[i])
 
-        p = int(numpy.ceil(len(w) * self.padding))
+        p = int(numpy.ceil(len(w) * padding))
         pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
         cat = numpy.concatenate
 
         criterion = w[:p].mean()
-        #logging.debug('left criterion %.3g', criterion)
-        if len(self.codebook.filters[i]) > 1 + p and criterion < self.shrink:
+        #logging.debug('filter %d: left criterion %.3f', i, criterion)
+        if len(self.codebook.filters[i]) > 1 + p and criterion < shrink:
             self.codebook.filters[i] = self.codebook.filters[i][p:]
-        if criterion > self.grow:
+        if criterion > grow:
             self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
 
         criterion = w[-p:].mean()
-        #logging.debug('right criterion %.3g', criterion)
-        if len(self.codebook.filters[i]) > 1 + p and criterion < self.shrink:
+        #logging.debug('filter %d: right criterion %.3f', i, criterion)
+        if len(self.codebook.filters[i]) > 1 + p and criterion < shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:-p]
-        if criterion > self.grow:
+        if criterion > grow:
             self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
 
 
@@ -572,7 +597,7 @@ class SpatialCodebook(Codebook):
         if _have_correlate and channels == 3:
             self._correlate = _correlate.correlate2d_from_rgb
 
-    def iterencode(self, signal, min_coeff=0., max_num_coeffs=-1):
+    def encode(self, signal, min_coeff=0., max_num_coeffs=-1, choose=softmax):
         '''Generate a set of codebook coefficients for encoding a signal.
 
         signal: A signal to encode.
@@ -581,6 +606,11 @@ class SpatialCodebook(Codebook):
         max_num_coeffs: Stop encoding when we have generated this many
           coefficients. Use a negative value to encode until min_coeff is
           reached.
+        choose: A callable that takes a numpy array and returns an index into
+          the flattened array. This callable is used to pick each of the
+          filters to be used during encoding. The default is to choose using a
+          softmax rule (the probability of choosing a filter is proportional to
+          its activation), but the greedy encoding strategy uses argmax.
 
         This method generates a sequence of tuples of the form (index,
         coefficient, (x offset, y offset)), where index refers to a codebook
@@ -602,26 +632,32 @@ class SpatialCodebook(Codebook):
             float) - numpy.inf
         for i, w in enumerate(self.filters):
             x, y = shapes[i]
-            self._correlate(signal, w, scores[i, :width - x + 1, :height - y + 1])
+            self._correlate(signal, w, scores[i, :width-x+1, :height-y+1])
 
         amplitude = abs(signal).sum()
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
 
             # find the largest coefficient, check that it's large enough.
-            index, x, y = numpy.unravel_index(self._choose(scores), scores.shape)
+            index, x, y = numpy.unravel_index(choose(scores), scores.shape)
             ex = x + shapes[index][0]
             ey = y + shapes[index][1]
             coeff = scores[index, x, y]
             if coeff < min_coeff:
+                logging.debug(
+                    'halting: coefficient %.2f < %.2f', coeff, min_coeff)
                 break
 
-            # check that using this filter does not increase signal amplitude.
+            # check that using this filter does not increase signal amplitude by
+            # more than 1 %.
             a = amplitude - abs(signal[x:ex, y:ey]).sum()
             signal[x:ex, y:ey] -= coeff * self.filters[index]
             a += abs(signal[x:ex, y:ey]).sum()
-            #logging.debug('coefficient %.3g, filter %d, offset %s yields amplitude %.3g', coeff, index, (x, y), a)
-            if a > amplitude:
+            #logging.debug('coefficient %.2f, filter %d, offset %s yields amplitude %.2f', coeff, index, (x, y), a)
+            if a > 1.01 * amplitude:
+                logging.debug('halting: coefficient %.2f, filter %d, '
+                              'offset %s yields amplitude %.2f > 1.01 * %.2f',
+                              coeff, index, (x, y), a, amplitude)
                 break
             amplitude = a
 
@@ -630,7 +666,8 @@ class SpatialCodebook(Codebook):
                 wx, wy = shapes[i][0] - 1, shapes[i][1] - 1
                 ox, oy = max(0, x - wx), max(0, y - wy)
                 px, py = min(ex, width - wx), min(ey, height - wy)
-                self._correlate(signal[ox:ex + wx, oy:ey + wy], w, scores[i, ox:px, oy:py])
+                self._correlate(
+                    signal[ox:ex + wx, oy:ey + wy], w, scores[i, ox:px, oy:py])
 
             yield index, coeff, (x, y)
 
@@ -654,92 +691,60 @@ class SpatialCodebook(Codebook):
 class SpatialTrainer(Trainer):
     '''Train a set of spatial codebook filters using signal data.'''
 
-    def __init__(self, codebook, min_coeff=0., max_num_coeffs=-1, samples=1,
-                 padding=0.1, shrink=0.005, grow=0.05):
-        '''Set up the trainer with some static learning parameters.
+    def _calculate_gradient(self, signal, encoding, grad, activity):
+        '''Calculate the gradient from one encoding of a signal.'''
+        for index, coeff, (x, y) in encoding:
+            w, h = self.codebook.filters[index].shape[:2]
+            grad[index] += coeff * s[x:x + w, y:y + h]
+            activity[index] += coeff
 
-        codebook: The matching pursuit codebook to train.
-        min_coeff: Train by encoding signals to this minimum coefficient
-          value.
-        max_num_coeffs: Train by encoding signals using this many coefficients.
-        samples: The number of encoding samples to draw when approximating the
-          gradient.
+    def _resize(self, i, padding, shrink, grow):
+        '''Resize codebook vector i using some energy heuristics.
+
+        i: The index of the codebook vector to resize.
         padding: The proportion of each codebook filter to consider as "padding"
-          when growing or shrinking. Values around 0.1 are usually good. None
+          when growing or shrinking. Values around 0.1 are usually good. 0
           disables growing or shrinking of the codebook filters.
         shrink: Remove the padding from a codebook filter when the signal in the
           padding falls below this threshold.
         grow: Add padding to a codebook filter when signal in the padding
           exceeds this threshold.
         '''
-        super(SpatialTrainer, self).__init__(
-            codebook, min_coeff, max_num_coeffs, samples)
-
-        assert 0 <= padding < 0.5
-        assert shrink < grow
-
-        self.padding = padding
-        self.shrink = shrink
-        self.grow = grow
-
-    def calculate_gradient(self, signal):
-        '''Calculate a gradient from a signal.
-
-        signal: A signal to use for collecting gradient information. This signal
-          will be modified in the course of the gradient collection process.
-        '''
-        grad = [numpy.zeros_like(w) for w in self.codebook.filters]
-        activity = numpy.zeros((len(grad), ), float)
-        for _ in range(self.samples):
-            s = signal.copy()
-            e = self.codebook.iterencode(s, self.min_coeff, self.max_num_coeffs)
-            for index, coeff, (x, y) in e:
-                w, h = self.codebook.filters[index].shape[:2]
-                grad[index] += coeff * s[x:x + w, y:y + h]
-                activity[index] += coeff
-        return grad, activity
-
-    def _resize(self, i):
-        '''Resize codebook vector i using some energy heuristics.
-
-        i: The index of the codebook vector to resize.
-        '''
-        if not 0 < self.padding < 0.5:
-            return
         w = abs(self.codebook.filters[i])
 
-        p = int(numpy.ceil(w.shape[0] * self.padding))
+        p = int(numpy.ceil(w.shape[0] * padding))
         pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
         cat = numpy.concatenate
 
         criterion = w[:p].mean()
-        #logging.debug('top criterion %.3g', criterion)
-        if len(self.codebook.filters[i]) > 1 + p and criterion < self.shrink:
+        #logging.debug('filter %d: top criterion %.3f', i, criterion)
+        if len(self.codebook.filters[i]) > 1 + p and criterion < shrink:
             self.codebook.filters[i] = self.codebook.filters[i][p:]
-        if criterion > self.grow:
+        if criterion > grow:
             self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
 
         criterion = w[-p:].mean()
-        #logging.debug('bottom criterion %.3g', criterion)
-        if len(self.codebook.filters[i]) > 1 + p and criterion < self.shrink:
+        #logging.debug('filter %d: bottom criterion %.3f', i, criterion)
+        if len(self.codebook.filters[i]) > 1 + p and criterion < shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:-p]
-        if criterion > self.grow:
+        if criterion > grow:
             self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
 
-        q = int(numpy.ceil(w.shape[1] * self.padding))
-        pad = numpy.zeros((len(self.codebook.filters[i]), q) + w.shape[2:], w.dtype)
+        p = len(self.codebook.filters[i])
+        q = int(numpy.ceil(w.shape[1] * padding))
+        pad = numpy.zeros((p, q) + w.shape[2:], w.dtype)
         cat = numpy.hstack
 
         criterion = w[:, :q].mean()
-        #logging.debug('left criterion %.3g', criterion)
-        if len(self.codebook.filters[i][0]) > 1 + q and criterion < self.shrink:
+        #logging.debug('filter %d: left criterion %.3f', i, criterion)
+        if len(self.codebook.filters[i][0]) > 1 + q and criterion < shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:, q:]
-        if criterion > self.grow:
+        if criterion > grow:
             self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
 
         criterion = w[:, -q:].mean()
-        #logging.debug('right criterion %.3g', criterion)
-        if len(self.codebook.filters[i][0]) > 1 + q and criterion < self.shrink:
+        #logging.debug('filter %d: right criterion %.3f', i, criterion)
+        if len(self.codebook.filters[i][0]) > 1 + q and criterion < shrink:
             self.codebook.filters[i] = self.codebook.filters[i][:, :-q]
-        if criterion > self.grow:
+        if criterion > grow:
             self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
