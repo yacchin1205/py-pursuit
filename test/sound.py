@@ -118,7 +118,9 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.3, max_num_coeffs=
     c = lmj.pursuit.TemporalCodebook(codebook, width)
     t = lmj.pursuit.TemporalTrainer(c, max_num_coeffs=max_num_coeffs)
     for _ in range(6):
-        t.learn(train, learning_rate, min_activity_ratio=0.2)
+        _, activity = t.learn(train, learning_rate)
+        t.resize(0.1, 0.01, 0.001)
+        t.resample(activity, 0.1)
         f += 1
         plot('full')
         s = t.reconstruct(test)
