@@ -37,18 +37,19 @@ sys.path.append(os.path.join(os.path.dirname(__file__), os.pardir))
 import lmj.pursuit
 
 FLAGS = optparse.OptionParser()
-FLAGS.add_option('', '--model')
-
-FLAGS.add_option('-c', '--min-coeff', type=float, default=0.01)
-FLAGS.add_option('-n', '--max-num-coeffs', type=int, default=-1)
-FLAGS.add_option('-a', '--min-activity-ratio', type=float, default=0.)
-FLAGS.add_option('-f', '--filters', type=int, default=6)
-FLAGS.add_option('', '--learning-rate', type=float, default=0.1)
-FLAGS.add_option('', '--padding', type=float, default=0.1)
-FLAGS.add_option('', '--grow', type=float, default=0.03)
-FLAGS.add_option('', '--shrink', type=float, default=0.003)
+FLAGS.add_option('-c', '--min-coeff', type=float, default=0.1)
+FLAGS.add_option('-n', '--max-num-coeffs', type=int, default=1000)
+FLAGS.add_option('-f', '--filters', type=int, default=5)
+FLAGS.add_option('-r', '--learning-rate', type=float, default=0.1)
 
 FLAGS.add_option('-s', '--save-frames', action='store_true')
+
+FLAGS.add_option('', '--min-activity-ratio', type=float, default=0.01)
+FLAGS.add_option('', '--padding', type=float, default=0.1)
+FLAGS.add_option('', '--grow', type=float, default=0.01)
+FLAGS.add_option('', '--shrink', type=float, default=0.001)
+
+FLAGS.add_option('', '--model')
 
 
 def now():
@@ -61,9 +62,15 @@ def load_image(path):
 
 def save_frame(width, height):
     pixels = gl.glReadPixels(0, 0, width, height, gl.GL_RGB, gl.GL_UNSIGNED_BYTE)
-    Image.fromstring(mode="RGB", size=(width, height), data=pixels
+    Image.fromstring(mode='RGB', size=(width, height), data=pixels
                      ).transpose(Image.FLIP_TOP_BOTTOM
                                  ).save(now().strftime('frame-%Y%m%d-%H%M%S.%f.png'))
+
+
+WhiteBlack = glumpy.colormap.Colormap(
+    'WhiteBlack',
+    (0.00, (1.0, 1.0, 1.0)),
+    (1.00, (0.0, 0.0, 0.0)))
 
 
 class Simulator(object):
@@ -83,32 +90,34 @@ class Simulator(object):
             opts.filters * opts.filters, (20, 20))
 
         self.trainer = lmj.pursuit.SpatialTrainer(
-            self.codebook,
-            min_coeff=opts.min_coeff,
-            max_num_coeffs=opts.max_num_coeffs,
-            padding=opts.padding,
-            grow=opts.grow,
-            shrink=opts.shrink,
-            )
+            self.codebook, opts.min_coeff, opts.max_num_coeffs)
 
         w = max(x.shape[0] for x in self.images)
         h = max(x.shape[1] for x in self.images)
-        self.source = numpy.zeros((w, h), 'f')
-        self.reconst = numpy.zeros((w, h), 'f')
-        self.filters = numpy.zeros((opts.filters, opts.filters, 20, 20), 'f')
-        self.features = numpy.zeros((opts.filters, opts.filters, w, h), 'f')
 
-        kwargs = dict(cmap=glumpy.colormap.Grey, vmin=-1, vmax=1, interpolation='bicubic')
-        self.source_image = glumpy.Image(self.source, **kwargs)
-        self.reconst_image = glumpy.Image(self.reconst, **kwargs)
+        self.source = numpy.zeros((w, h), 'f')
+        self.source_image = glumpy.Image(
+            self.source, vmin=-1, vmax=1, cmap=glumpy.colormap.Grey)
+
+        self.reconst = numpy.zeros((w, h), 'f')
+        self.reconst_image = glumpy.Image(
+            self.reconst, vmin=-1, vmax=1, cmap=glumpy.colormap.Grey)
+
+        self.filter_kwargs = dict(vmin=-0.1, vmax=0.1)
+        self.filters = numpy.zeros((opts.filters, opts.filters, 20, 20), 'f')
         self.filter_images = [
-            [glumpy.Image(f, vmin=-0.1, vmax=0.1, interpolation='bicubic') for f in fs]
+            [glumpy.Image(f, **self.filter_kwargs) for f in fs]
             for fs in self.filters]
+
+        self.features = numpy.zeros((opts.filters, opts.filters, w, h), 'f')
         self.feature_images = [
-            [glumpy.Image(f, vmin=0, vmax=50) for f in fs]
+            [glumpy.Image(f, vmin=0, vmax=50, cmap=WhiteBlack) for f in fs]
             for fs in self.features]
 
-        self.iterator = self.learn_forever()
+        self._iterator = self.learn_forever()
+
+    def step(self):
+        return next(self._iterator)
 
     def learn(self):
         self.source[:] = 0.
@@ -116,45 +125,46 @@ class Simulator(object):
         self.features[:] = 0.
 
         pixels = self.images[rng.randint(len(self.images))].copy()
-        w, h = pixels.shape
+        w, h = pixels.shape[:2]
         self.source[:w, :h] += pixels
 
         grad = [numpy.zeros_like(w) for w in self.codebook.filters]
         activity = numpy.zeros((len(grad), ), float)
-        for index, coeff, (x, y) in self.codebook.iterencode(
+        for index, coeff, (x, y) in self.codebook.encode(
                 pixels,
                 self.opts.min_coeff,
-                self.opts.max_num_coeffs):
+                self.opts.max_num_coeffs,
+                lmj.pursuit.softmax):
             a, b = numpy.unravel_index(index, (opts.filters, opts.filters))
             w, h = self.codebook.filters[index].shape[:2]
-            grad[index] += coeff * pixels[x:x+w, y:y+h]
-            activity[index] += coeff
             self.features[a, b, x:x+w, y:y+h] += coeff
             self.reconst[x:x+w, y:y+h] += coeff * self.codebook.filters[index]
+            grad[index] += coeff * pixels[x:x+w, y:y+h]
+            activity[index] += coeff
             yield
 
         self.trainer.apply_gradient(
-            grad,
-            activity,
-            self.opts.learning_rate,
-            self.opts.min_activity_ratio)
+            (g / (a or 1) for g, a in zip(grad, activity)), self.opts.learning_rate)
+        self.trainer.resize(self.opts.padding, self.opts.shrink, self.opts.grow)
+        self.trainer.resample(activity, self.opts.min_activity_ratio)
 
     def refresh_filters(self):
         w = max(w.shape[0] for w in self.codebook.filters)
         h = max(w.shape[1] for w in self.codebook.filters)
 
         if w > self.filters.shape[2] or h > self.filters.shape[3]:
-            x = max(w * 1.5, h * 1.5)
-            self.filters = numpy.zeros((self.opts.filters, self.opts.filters, x, x), 'f')
+            shape = list(self.filters.shape)
+            shape[2] = shape[3] = max(w * 1.5, h * 1.5)
+            self.filters = numpy.zeros(shape, 'f')
             self.filter_images = [
-                [glumpy.Image(f, vmin=-0.2, vmax=0.2) for f in fs]
+                [glumpy.Image(f, **self.filter_kwargs) for f in fs]
                 for fs in self.filters]
 
         self.filters[:] = 0.
         for r in range(self.opts.filters):
             for c in range(self.opts.filters):
                 f = self.codebook.filters[r * self.opts.filters + c]
-                x, y = f.shape
+                x, y = f.shape[:2]
                 a = (self.filters.shape[2] - x) // 2
                 b = (self.filters.shape[3] - y) // 2
                 self.filters[r, c, a:a+x, b:b+y] += f
@@ -215,7 +225,7 @@ if __name__ == '__main__':
         if sim.updates != 0:
             sim.updates -= 1
             try:
-                next(sim.iterator)
+                sim.step()
             except:
                 logging.exception('error while training !')
                 sys.exit()
