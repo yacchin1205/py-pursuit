@@ -51,8 +51,6 @@ except ImportError:
     logging.info('cannot import _correlate module, trying scipy')
     import scipy.signal
 
-
-# define a backup correlation function in case the c module isn't present.
 def _default_correlate(s, w, r):
     '''Assign to r the values from scipy.signal.correlate(s, w).'''
     r[:] = scipy.signal.correlate(s, w, 'valid')
@@ -68,10 +66,8 @@ def softmax(a):
     a = a.ravel()
     z = a.max()
 
-    # often we're dealing with 1000s of values---lots to search through, with
-    # low probability of choosing the true max. so we limit the values to those
-    # that are at least 10 % of the max. this can massively reduce the number of
-    # values we have to sum and bisect !
+    # limit consideration to values that are at least 10 % of the max. this can
+    # massively reduce the number of values we have to sum and bisect !
     mask, = numpy.nonzero(a > 0.1 * z)
     cdf = numpy.exp(a[mask] - z).cumsum()
 
@@ -277,14 +273,15 @@ class Trainer(object):
             s = signal.copy()
             encoding = self.codebook.encode(
                 s, self.min_coeff, self.max_num_coeffs, self.choose)
-            self._calculate_gradient(s, encoding, grad, activity)
+            for index, coeff, error in self._calculate_gradient(s, encoding):
+                grad[index] += coeff * error
+                activity[index] += coeff
         return grad, activity
 
-    def _calculate_gradient(self, signal, encoding, grad, activty):
+    def _calculate_gradient(self, error, encoding):
         '''Calculate the gradient from one encoding of a signal.'''
         for index, coeff in encoding:
-            grad[index] += coeff * signal
-            activity[index] += coeff
+            yield index, coeff, error
 
     def apply_gradient(self, grad, learning_rate):
         '''Apply gradients to the codebook filters.
@@ -472,9 +469,8 @@ class TemporalCodebook(Codebook):
 
         # we cache the correlations between signal and codebook to avoid
         # redundant computation.
-        scores = numpy.zeros(
-            (len(self.filters), len(signal) - min(lengths) + 1),
-            float) - numpy.inf
+        shape = (len(self.filters), len(signal) - min(lengths) + 1)
+        scores = numpy.zeros(shape, float) - numpy.inf
         for i, w in enumerate(self.filters):
             self._correlate(signal, w, scores[i, :len(signal) - len(w) + 1])
 
@@ -533,12 +529,11 @@ class TemporalCodebook(Codebook):
 class TemporalTrainer(Trainer):
     '''Train a set of temporal codebook filters using signal data.'''
 
-    def _calculate_gradient(self, signal, encoding, grad, activity):
+    def _calculate_gradient(self, error, encoding):
         '''Calculate the gradient from one encoding of a signal.'''
-        for index, coeff, offset in encoding:
-            o = len(self.codebook.filters[index])
-            grad[index] += coeff * s[offset:offset + o]
-            activity[index] += coeff
+        for index, coeff, x in encoding:
+            w = self.codebook.filters[index].shape[0]
+            yield index, coeff, error[x:x + w]
 
     def _resize(self, i, padding, shrink, grow):
         '''Resize codebook vector i using some energy heuristics.
@@ -625,11 +620,10 @@ class SpatialCodebook(Codebook):
 
         # we cache the correlations between signal and codebook to avoid
         # redundant computation.
-        scores = numpy.zeros(
-            (len(self.filters),
-             width - min(w for w, _ in shapes) + 1,
-             height - min(h for _, h in shapes) + 1),
-            float) - numpy.inf
+        shape = (len(self.filters),
+                 width - min(w for w, _ in shapes) + 1,
+                 height - min(h for _, h in shapes) + 1)
+        scores = numpy.zeros(shape, float) - numpy.inf
         for i, w in enumerate(self.filters):
             x, y = shapes[i]
             self._correlate(signal, w, scores[i, :width-x+1, :height-y+1])
@@ -691,12 +685,11 @@ class SpatialCodebook(Codebook):
 class SpatialTrainer(Trainer):
     '''Train a set of spatial codebook filters using signal data.'''
 
-    def _calculate_gradient(self, signal, encoding, grad, activity):
+    def _calculate_gradient(self, error, encoding):
         '''Calculate the gradient from one encoding of a signal.'''
         for index, coeff, (x, y) in encoding:
             w, h = self.codebook.filters[index].shape[:2]
-            grad[index] += coeff * s[x:x + w, y:y + h]
-            activity[index] += coeff
+            yield index, coeff, error[x:x + w, y:y + h]
 
     def _resize(self, i, padding, shrink, grow):
         '''Resize codebook vector i using some energy heuristics.
