@@ -309,6 +309,9 @@ class Trainer(object):
           number in [0, 1], where 0 means never replace any filters, and 1 means
           replace all filters whose activity is below the median.
         '''
+        if not 0 < min_activity_ratio < 1:
+            return
+
         median = numpy.sort(activity)[len(activity) // 2]
         logging.debug('median filter activity: %.1f', median)
         min_act = min_activity_ratio * median
@@ -380,7 +383,7 @@ class Trainer(object):
         choose: A callable that takes a numpy array and returns an index into
           the flattened array. This callable is used to pick each of the
           filters to be used during encoding. We do reconstruction using argmax
-          by default.
+          by default to obtain the "best" greedy encoding.
 
         Returns a numpy array with the same shape as the original signal,
         containing reconstructed values instead of the original values.
@@ -547,25 +550,16 @@ class TemporalTrainer(Trainer):
         grow: Add padding to a codebook filter when signal in the padding
           exceeds this threshold.
         '''
-        w = abs(self.codebook.filters[i])
-
-        p = int(numpy.ceil(len(w) * padding))
-        pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
-        cat = numpy.concatenate
-
-        criterion = w[:p].mean()
-        #logging.debug('filter %d: left criterion %.3f', i, criterion)
-        if len(self.codebook.filters[i]) > 1 + p and criterion < shrink:
-            self.codebook.filters[i] = self.codebook.filters[i][p:]
+        z = abs(self.codebook.filters[i])
+        p = int(numpy.ceil(len(z) * padding))
+        criterion = numpy.concatenate([z[:p], z[-p:]]).max()
+        logging.debug('filter %d: resize criterion %.3f', i, criterion)
+        if criterion < shrink and len(self.codebook.filters[i]) > 1 + 2 * p:
+            self.codebook.filters[i] = self.codebook.filters[i][p:-p]
         if criterion > grow:
-            self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
-
-        criterion = w[-p:].mean()
-        #logging.debug('filter %d: right criterion %.3f', i, criterion)
-        if len(self.codebook.filters[i]) > 1 + p and criterion < shrink:
-            self.codebook.filters[i] = self.codebook.filters[i][:-p]
-        if criterion > grow:
-            self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
+            pad = numpy.zeros((p, ) + z.shape[1:], z.dtype)
+            self.codebook.filters[i] = numpy.concatenate(
+                [pad, self.codebook.filters[i], pad])
 
 
 class SpatialCodebook(Codebook):
@@ -703,41 +697,18 @@ class SpatialTrainer(Trainer):
         grow: Add padding to a codebook filter when signal in the padding
           exceeds this threshold.
         '''
-        w = abs(self.codebook.filters[i])
-
-        p = int(numpy.ceil(w.shape[0] * padding))
-        pad = numpy.zeros((p, ) + w.shape[1:], w.dtype)
-        cat = numpy.concatenate
-
-        criterion = w[:p].mean()
-        #logging.debug('filter %d: top criterion %.3f', i, criterion)
-        if len(self.codebook.filters[i]) > 1 + p and criterion < shrink:
-            self.codebook.filters[i] = self.codebook.filters[i][p:]
+        z = abs(self.codebook.filters[i])
+        w, h = z.shape[:2]
+        p = int(numpy.ceil(w * padding))
+        q = int(numpy.ceil(h * padding))
+        criterion = numpy.concatenate([
+            z[:p].flatten(), z[-p:].flatten(),
+            z[:, :q].flatten(), z[:, -q:].flatten()]).max()
+        logging.debug('filter %d: resize criterion %.3f', i, criterion)
+        if criterion < shrink and w > 1 + 2 * p and h > 1 + 2 * q:
+            self.codebook.filters[i] = self.codebook.filters[i][p:-p, q:-q]
         if criterion > grow:
-            self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
-
-        criterion = w[-p:].mean()
-        #logging.debug('filter %d: bottom criterion %.3f', i, criterion)
-        if len(self.codebook.filters[i]) > 1 + p and criterion < shrink:
-            self.codebook.filters[i] = self.codebook.filters[i][:-p]
-        if criterion > grow:
-            self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
-
-        p = len(self.codebook.filters[i])
-        q = int(numpy.ceil(w.shape[1] * padding))
-        pad = numpy.zeros((p, q) + w.shape[2:], w.dtype)
-        cat = numpy.hstack
-
-        criterion = w[:, :q].mean()
-        #logging.debug('filter %d: left criterion %.3f', i, criterion)
-        if len(self.codebook.filters[i][0]) > 1 + q and criterion < shrink:
-            self.codebook.filters[i] = self.codebook.filters[i][:, q:]
-        if criterion > grow:
-            self.codebook.filters[i] = cat([pad, self.codebook.filters[i]])
-
-        criterion = w[:, -q:].mean()
-        #logging.debug('filter %d: right criterion %.3f', i, criterion)
-        if len(self.codebook.filters[i][0]) > 1 + q and criterion < shrink:
-            self.codebook.filters[i] = self.codebook.filters[i][:, :-q]
-        if criterion > grow:
-            self.codebook.filters[i] = cat([self.codebook.filters[i], pad])
+            ppad = numpy.zeros((p, h) + z.shape[2:], z.dtype)
+            qpad = numpy.zeros((2 * p + w, q) + z.shape[2:], z.dtype)
+            self.codebook.filters[i] = numpy.hstack(
+                [qpad, numpy.concatenate([ppad, self.codebook.filters[i], ppad]), qpad])
