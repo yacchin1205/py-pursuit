@@ -69,7 +69,7 @@ def rmse(a, b):
     return '\t%.1f' % (1000 * numpy.linalg.norm(a - b) / numpy.sqrt(len(a)))
 
 
-def evaluate(train, test, width, codebook=10, learning_rate=0.3, max_num_coeffs=100):
+def evaluate(train, test, width, codebook=10):
     print codebook, '\t', width,
 
     def plot(label):
@@ -100,10 +100,10 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.3, max_num_coeffs=
     # windowed
     f = 0
     c = lmj.pursuit.Codebook(codebook, width)
-    t = lmj.pursuit.Trainer(c, max_num_coeffs=1)
-    for _ in range(6):
-        for w in random_windows(max_num_coeffs, train, width):
-            t.learn(w, learning_rate)
+    t = lmj.pursuit.Trainer(c, max_num_coeffs=1, noise=0.1)
+    for _ in range(4):
+        for w in random_windows(500, train, width):
+            t.learn(w, 0.3)
         f += 1
         plot('window')
         s = numpy.zeros_like(test)
@@ -116,9 +116,9 @@ def evaluate(train, test, width, codebook=10, learning_rate=0.3, max_num_coeffs=
     # continuous
     f = 0
     c = lmj.pursuit.TemporalCodebook(codebook, width)
-    t = lmj.pursuit.TemporalTrainer(c, max_num_coeffs=max_num_coeffs)
-    for _ in range(6):
-        _, activity = t.learn(train, learning_rate)
+    t = lmj.pursuit.TemporalTrainer(c, max_num_coeffs=500, noise=0.1)
+    for _ in range(4):
+        _, activity = t.learn(train, 0.3)
         t.resize(0.1, 0.01, 0.001)
         t.resample(activity, 0.1)
         f += 1
@@ -151,7 +151,7 @@ if __name__ == '__main__':
     print 'Matching Pursuit Test'
     print 'We are encoding a test signal with rms power', rms
     print 'This table lists rms reconstruction error for different codebooks:'
-    print '\t'.join('count length single . . . . . multiple'.split()).replace('.', '')
+    print '\t'.join('count length single . . . multiple'.split()).replace('.', '')
     for codebook in (10, 20, 50):
         for width in (0.1, 0.2, 0.5):
             evaluate(train, test, int(SAMPLE_RATE / 100. * width), codebook)
