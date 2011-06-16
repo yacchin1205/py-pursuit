@@ -2,8 +2,9 @@ import setuptools
 
 setuptools.setup(
     name='lmj.pursuit',
-    version='0.1',
+    version='0.2',
     install_requires=['numpy'],
+    namespace_packages=['lmj'],
     py_modules=['lmj.pursuit'],
     ext_modules=[setuptools.Extension('lmj._correlate', sources=['lmj/correlate.c'])],
     author='Leif Johnson',
@@ -15,7 +16,7 @@ setuptools.setup(
               'sparse-coding '
               'compressed-sensing '
               'machine-learning'),
-    url='http://github.com/lmjohns3/py-pursuit/',
+    url='http://github.com/lmjohns3/py-pursuit',
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Science/Research',
