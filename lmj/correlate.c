@@ -79,8 +79,8 @@ static PyObject *correlate1d(PyObject *self, PyObject *args) {
     const int flend = filter->dimensions[0];
     const int rlend = result->dimensions[0];
 
-    double *s = (double *) signal->data;
-    double *f = (double *) filter->data;
+    double const * const s = (double *) signal->data;
+    double const * const f = (double *) filter->data;
     double *r = (double *) result->data;
     int i, a;
     double acc;
@@ -149,8 +149,8 @@ static PyObject *correlate1d_from_2d(PyObject *self, PyObject *args) {
 
     const int rlend = result->dimensions[0];
 
-    double *s = (double *) signal->data;
-    double *f = (double *) filter->data;
+    double const * const s = (double *) signal->data;
+    double const * const f = (double *) filter->data;
     double *r = (double *) result->data;
     int i, a, b;
     double acc;
@@ -219,8 +219,8 @@ static PyObject *correlate2d(PyObject *self, PyObject *args) {
 
     const int rlend = result->dimensions[0];
 
-    double *s = (double *) signal->data;
-    double *f = (double *) filter->data;
+    double const * const s = (double *) signal->data;
+    double const * const f = (double *) filter->data;
     double *r = (double *) result->data;
     int i, j, a, b;
     double acc;
@@ -315,8 +315,8 @@ static PyObject *correlate2d_from_rgb(PyObject *self, PyObject *args) {
      *               4 * d[g] * d[g] +
      *               (2 + (255 - r) / 256) * d[b] * d[b])
      */
-    double *s = (double *) signal->data;
-    double *f = (double *) filter->data;
+    double const * const s = (double *) signal->data;
+    double const * const f = (double *) filter->data;
     double *r = (double *) result->data;
     int i, j, a, b;
     double acc;
