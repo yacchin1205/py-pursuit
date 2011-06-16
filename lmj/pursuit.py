@@ -255,9 +255,10 @@ class Trainer(object):
         activity = numpy.zeros((len(grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
-            encoding = self.codebook.encode(
-                s, self.min_coeff, self.max_num_coeffs, self.noise)
-            for index, coeff, error in self._calculate_gradient(s, encoding):
+            encoding = list(self.codebook.encode(
+                s, self.min_coeff, self.max_num_coeffs, self.noise))
+            for index, coeff, error in self._calculate_gradient(
+                    s - self.codebook.decode(encoding, s.shape), encoding):
                 grad[index] += coeff * error
                 activity[index] += coeff
         return grad, activity
