@@ -56,24 +56,6 @@ def _default_correlate(s, w, r):
     r[:] = scipy.signal.correlate(s, w, 'valid')
 
 
-def argmax(a):
-    '''Return the index of the largest value in a.'''
-    return a.argmax()
-
-
-def softmax(a):
-    '''Return the index of the largest value in a, probabilistically.'''
-    a = a.ravel()
-    z = a.max()
-
-    # limit consideration to values that are at least 10 % of the max. this can
-    # massively reduce the number of values we have to sum and bisect !
-    mask, = numpy.nonzero(a > 0.1 * z)
-    cdf = numpy.exp(a[mask] - z).cumsum()
-
-    return mask[cdf.searchsorted(rng.uniform(0, cdf[-1]))]
-
-
 class Codebook(object):
     '''Matching pursuit encodes signals using a codebook of filters.
 
@@ -109,7 +91,7 @@ class Codebook(object):
         for w in self.filters:
             w /= numpy.linalg.norm(w)
 
-    def encode(self, signal, min_coeff=0., max_num_coeffs=-1, choose=softmax):
+    def encode(self, signal, min_coeff=0., max_num_coeffs=-1, noise=0.):
         '''Encode a signal as a sequence of index, coefficient pairs.
 
         signal: A numpy array containing a signal to encode. The values in the
@@ -118,20 +100,21 @@ class Codebook(object):
           this threshold.
         max_num_coeffs: Stop encoding when this many filters have been used in
           the encoding.
-        choose: A callable that takes a numpy array and returns an index into
-          the flattened array. This callable is used to pick each of the
-          filters to be used during encoding. The default is to choose using a
-          softmax rule (the probability of choosing a filter is proportional to
-          its activation), but the greedy encoding strategy uses argmax.
+        noise: Coefficients are chosen based on their responses to the signal,
+          plus white noise with this standard deviation. Use 0 to get the
+          traditional argmax behavior.
 
         Generates a sequence of (index, coefficient) tuples.
         '''
-        coeffs = numpy.array([(signal * w).sum() for w in self.filters])
+        scores = numpy.array([(signal * w).sum() for w in self.filters])
+        blur = noise * rng.randn(*scores.shape)
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
+            if not max_num_coeffs % 100:
+                blur = noise * rng.randn(*scores.shape)
 
-            index = choose(coeffs)
-            coeff = coeffs[index]
+            index = (scores + blur).argmax()
+            coeff = scores[index]
             if coeff < min_coeff:
                 logging.debug(
                     'halting: coefficient %.2f < %.2f', coeff, min_coeff)
@@ -139,9 +122,9 @@ class Codebook(object):
 
             signal -= coeff * self.filters[index]
 
-            coeffs[index] = -numpy.inf
-            mask = numpy.isfinite(coeffs)
-            coeffs[mask] = [(signal * w).sum() for w in self.filters[mask]]
+            scores[index] = -numpy.inf
+            mask = numpy.isfinite(scores)
+            scores[mask] = [(signal * w).sum() for w in self.filters[mask]]
 
             yield index, coeff
 
@@ -158,16 +141,14 @@ class Codebook(object):
         except TypeError:
             return numpy.zeros_like(self.filters[0])
 
-    def encode_frames(self, frames, min_coeff=0., choose=softmax):
+    def encode_frames(self, frames, min_coeff=0., noise=0.):
         '''Encode a sequence of frames.
 
         frames: A (possibly infinite) sequence of data frames to encode.
         min_coeff: Only fire for filters that exceed this threshold.
-        choose: A callable that takes a numpy array and returns an index into
-          the flattened array. This callable is used to pick each of the
-          filters to be used during encoding. The default is to choose using a
-          softmax rule (the probability of choosing a filter is proportional to
-          its activation), but the greedy encoding strategy uses argmax.
+        noise: Coefficients are chosen based on their responses to the signal,
+          plus white noise with this standard deviation. Use 0 to get the
+          traditional argmax behavior.
 
         Generates a sequence of ((index, coeff), ...) tuples at the same rate as
         the input frames. If a given input frame does not yield a filter
@@ -198,12 +179,13 @@ class Codebook(object):
 
             # calculate coefficients starting at offset m - N.
             window = memory[m - N:m]
-            coeffs = numpy.array(
+            scores = numpy.array(
                 [(window[:len(w)] * w).sum() for w in self.filters])
+            blur = noise * rng.randn(*scores.shape)
             encoding = []
             while True:
-                index = choose(coeffs)
-                coeff = coeffs[index]
+                index = (scores + blur).argmax()
+                coeff = scores[index]
                 if coeff < min_coeff:
                     logging.debug(
                         'halting: coefficient %.2f < %.2f', coeff, min_coeff)
@@ -241,8 +223,7 @@ class Codebook(object):
 class Trainer(object):
     '''Train the codebook filters in a matching pursuit encoder.'''
 
-    def __init__(self, codebook, min_coeff=0., max_num_coeffs=-1, samples=1,
-                 choose=softmax):
+    def __init__(self, codebook, min_coeff=0., max_num_coeffs=-1, samples=1, noise=0.):
         '''Initialize this trainer with some learning parameters.
 
         codebook: The matching pursuit codebook to train.
@@ -251,12 +232,15 @@ class Trainer(object):
         max_num_coeffs: Train by encoding signals using this many coefficients.
         samples: The number of encoding samples to draw when approximating the
           gradient.
+        noise: Coefficients are chosen based on their responses to the signal,
+          plus white noise with this standard deviation. Use 0 to get the
+          traditional argmax behavior.
         '''
         self.codebook = codebook
         self.min_coeff = min_coeff
         self.max_num_coeffs = max_num_coeffs
         self.samples = samples
-        self.choose = choose
+        self.noise = noise
 
     def calculate_gradient(self, signal):
         '''Calculate a gradient from a signal.
@@ -272,7 +256,7 @@ class Trainer(object):
         for _ in range(self.samples):
             s = signal.copy()
             encoding = self.codebook.encode(
-                s, self.min_coeff, self.max_num_coeffs, self.choose)
+                s, self.min_coeff, self.max_num_coeffs, self.noise)
             for index, coeff, error in self._calculate_gradient(s, encoding):
                 grad[index] += coeff * error
                 activity[index] += coeff
@@ -375,22 +359,18 @@ class Trainer(object):
             (g / (a or 1) for g, a in zip(grad, activity)), learning_rate)
         return grad, activity
 
-    def reconstruct(self, signal, choose=argmax):
+    def reconstruct(self, signal):
         '''Reconstruct the given signal using our pursuit codebook.
 
         signal: A signal to encode and then reconstruct. This signal will not
           be modified.
-        choose: A callable that takes a numpy array and returns an index into
-          the flattened array. This callable is used to pick each of the
-          filters to be used during encoding. We do reconstruction using argmax
-          by default to obtain the "best" greedy encoding.
 
         Returns a numpy array with the same shape as the original signal,
-        containing reconstructed values instead of the original values.
+        containing reconstructed values.
         '''
         return self.codebook.decode(
             self.codebook.encode(
-                signal.copy(), self.min_coeff, self.max_num_coeffs, choose),
+                signal.copy(), self.min_coeff, self.max_num_coeffs, 0.),
             signal.shape)
 
 
@@ -445,7 +425,7 @@ class TemporalCodebook(Codebook):
         if _have_correlate and len(frame_shape) == 1:
             self._correlate = _correlate.correlate1d_from_2d
 
-    def encode(self, signal, min_coeff=0., max_num_coeffs=-1, choose=softmax):
+    def encode(self, signal, min_coeff=0., max_num_coeffs=-1, noise=0.):
         '''Generate a set of codebook coefficients for encoding a signal.
 
         signal: A signal to encode.
@@ -454,11 +434,9 @@ class TemporalCodebook(Codebook):
         max_num_coeffs: Stop encoding when we have generated this many
           coefficients. Use a negative value to encode until min_coeff is
           reached.
-        choose: A callable that takes a numpy array and returns an index into
-          the flattened array. This callable is used to pick each of the
-          filters to be used during encoding. The default is to choose using a
-          softmax rule (the probability of choosing a filter is proportional to
-          its activation), but the greedy encoding strategy uses argmax.
+        noise: Coefficients are chosen based on their responses to the signal,
+          plus white noise with this standard deviation. Use 0 to get the
+          traditional argmax behavior.
 
         This method generates a sequence of tuples of the form (index,
         coefficient, offset), where index refers to a codebook filter and
@@ -468,24 +446,29 @@ class TemporalCodebook(Codebook):
         See the TemporalTrainer class for an example of how to use these results
         to update the codebook filters.
         '''
-        lengths = [len(w) for w in self.filters]
+        width = signal.shape[0]
+        shapes = [w.shape[0] for w in self.filters]
 
         # we cache the correlations between signal and codebook to avoid
         # redundant computation.
-        shape = (len(self.filters), len(signal) - min(lengths) + 1)
-        scores = numpy.zeros(shape, float) - numpy.inf
+        shape = (len(self.filters), width - min(shapes) + 1)
+        scores = numpy.zeros(shape, float)
         for i, w in enumerate(self.filters):
-            self._correlate(signal, w, scores[i, :len(signal) - len(w) + 1])
+            self._correlate(signal, w, scores[i, :width - len(w) + 1])
+
+        blur = noise * rng.randn(*shape)
 
         amplitude = abs(signal).sum()
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
+            if not max_num_coeffs % 100:
+                blur = noise * rng.randn(*shape)
 
             # find the largest coefficient, check that it's large enough.
-            index, offset = numpy.unravel_index(choose(scores), scores.shape)
+            index, offset = numpy.unravel_index(
+                (scores + blur).argmax(), shape)
+            end = offset + shapes[index]
             coeff = scores[index, offset]
-            length = lengths[index]
-            end = offset + length
             if coeff < min_coeff:
                 logging.debug(
                     'halting: coefficient %.2f < %.2f', coeff, min_coeff)
@@ -506,7 +489,7 @@ class TemporalCodebook(Codebook):
 
             # update the correlation cache for the changed part of signal.
             for i, w in enumerate(self.filters):
-                l = lengths[i] - 1
+                l = shapes[i] - 1
                 o = max(0, offset - l)
                 p = min(end, len(signal) - l)
                 self._correlate(signal[o:end + l], w, scores[i, o:p])
@@ -586,7 +569,7 @@ class SpatialCodebook(Codebook):
         if _have_correlate and channels == 3:
             self._correlate = _correlate.correlate2d_from_rgb
 
-    def encode(self, signal, min_coeff=0., max_num_coeffs=-1, choose=softmax):
+    def encode(self, signal, min_coeff=0., max_num_coeffs=-1, noise=0.):
         '''Generate a set of codebook coefficients for encoding a signal.
 
         signal: A signal to encode.
@@ -595,11 +578,9 @@ class SpatialCodebook(Codebook):
         max_num_coeffs: Stop encoding when we have generated this many
           coefficients. Use a negative value to encode until min_coeff is
           reached.
-        choose: A callable that takes a numpy array and returns an index into
-          the flattened array. This callable is used to pick each of the
-          filters to be used during encoding. The default is to choose using a
-          softmax rule (the probability of choosing a filter is proportional to
-          its activation), but the greedy encoding strategy uses argmax.
+        noise: Coefficients are chosen based on their responses to the signal,
+          plus white noise with this standard deviation. Use 0 to get the
+          traditional argmax behavior.
 
         This method generates a sequence of tuples of the form (index,
         coefficient, (x offset, y offset)), where index refers to a codebook
@@ -617,17 +598,22 @@ class SpatialCodebook(Codebook):
         shape = (len(self.filters),
                  width - min(w for w, _ in shapes) + 1,
                  height - min(h for _, h in shapes) + 1)
-        scores = numpy.zeros(shape, float) - numpy.inf
+        scores = numpy.zeros(shape, float)
         for i, w in enumerate(self.filters):
             x, y = shapes[i]
             self._correlate(signal, w, scores[i, :width-x+1, :height-y+1])
 
+        blur = noise * rng.randn(*shape)
+
         amplitude = abs(signal).sum()
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
+            if not max_num_coeffs % 100:
+                blur = noise * rng.randn(*shape)
 
             # find the largest coefficient, check that it's large enough.
-            index, x, y = numpy.unravel_index(choose(scores), scores.shape)
+            index, x, y = numpy.unravel_index(
+                (scores + blur).argmax(), shape)
             ex = x + shapes[index][0]
             ey = y + shapes[index][1]
             coeff = scores[index, x, y]
