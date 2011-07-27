@@ -75,36 +75,36 @@ def evaluate(train, test, width, codebook=10):
     def plot(label):
         if not GRAPHS:
             return
-        for i, w in enumerate(c.codebook):
-            plt.plot([i + 1] * len(w), 'k-', lw=0.5, alpha=0.5, aa=True)
-            plt.plot(i + 1 + w, 'k-', lw=1, alpha=0.8, aa=True)
+        for i, f in enumerate(c.codebook):
+            plt.plot([i + 1] * len(f), 'k-', lw=0.5, alpha=0.5, aa=True)
+            plt.plot(i + 1 + f, 'k-', lw=1, alpha=0.8, aa=True)
         o = rng.randint(0, len(train) - width - 1)
         plt.plot(train[o:o+width], 'r-', aa=True)
         plt.gca().set_yticks([])
         plt.box(False)
-        plt.savefig(os.path.join(GRAPHS, '%s-w%03d-c%03d-%05d-basis.png' % (label, width, codebook, f)))
+        plt.savefig(os.path.join(GRAPHS, '%s-w%03d-c%03d-%05d-basis.png' % (label, width, codebook, seq)))
         plt.clf()
 
     def plot_residual(label, a, b):
         if not GRAPHS:
             return
-        w = 300
-        corr = scipy.signal.correlate(abs(a), numpy.ones(w), 'valid')
-        i = min(corr.argmax(), len(a) - w)
-        plt.plot(a[i:i+w], 'b', alpha=0.8, aa=True)
-        plt.plot(b[i:i+w], 'k', alpha=0.8, aa=True)
-        plt.plot((a - b)[i:i+w], 'r', alpha=0.8, aa=True)
-        plt.savefig(os.path.join(GRAPHS, '%s-w%03d-c%03d-%05d-resid.png' % (label, width, codebook, f)))
+        win = 300
+        corr = scipy.signal.correlate(abs(a), numpy.ones(win), 'valid')
+        i = min(corr.argmax(), len(a) - win)
+        plt.plot(a[i:i+win], 'b', alpha=0.8, aa=True)
+        plt.plot(b[i:i+win], 'k', alpha=0.8, aa=True)
+        plt.plot((a - b)[i:i+win], 'r', alpha=0.8, aa=True)
+        plt.savefig(os.path.join(GRAPHS, '%s-w%03d-c%03d-%05d-resid.png' % (label, width, codebook, seq)))
         plt.clf()
 
     # windowed
-    f = 0
+    seq = 0
     c = lmj.pursuit.Codebook(codebook, width)
     t = lmj.pursuit.Trainer(c, max_num_coeffs=1, noise=0.1)
     for _ in range(4):
         for w in random_windows(500, train, width):
             t.learn(w, 0.3)
-        f += 1
+        seq += 1
         plot('window')
         s = numpy.zeros_like(test)
         for o, w in iter_windows(test, width):
@@ -114,14 +114,14 @@ def evaluate(train, test, width, codebook=10):
         sys.stdout.flush()
 
     # continuous
-    f = 0
+    seq = 0
     c = lmj.pursuit.TemporalCodebook(codebook, width)
     t = lmj.pursuit.TemporalTrainer(c, max_num_coeffs=500, noise=0.1)
     for _ in range(4):
         _, activity = t.learn(train, 0.3)
         t.resize(0.1, 0.01, 0.001)
         t.resample(activity, 0.1)
-        f += 1
+        seq += 1
         plot('full')
         s = t.reconstruct(test)
         plot_residual('full', s, test)

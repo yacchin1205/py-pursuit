@@ -51,9 +51,9 @@ except ImportError:
     logging.info('cannot import _correlate module, trying scipy')
     import scipy.signal
 
-def _default_correlate(s, w, r):
-    '''Assign to r the values from scipy.signal.correlate(s, w).'''
-    r[:] = scipy.signal.correlate(s, w, 'valid')
+def _default_correlate(s, f, r):
+    '''Assign to r the values from scipy.signal.correlate(s, f).'''
+    r[:] = scipy.signal.correlate(s, f, 'valid')
 
 
 class Codebook(object):
@@ -65,9 +65,9 @@ class Codebook(object):
     according to :
 
       x_1 = x
-      x_{n+1} = x_n - c_n * w_n
-      w_n = argmax_w <x_n, w>
-      c_n = <x_n, w_n>
+      x_{n+1} = x_n - c_n * f_n
+      f_n = argmax_f <x_n, f>
+      c_n = <x_n, f_n>
 
     This implementation of the algorithm is intended to encode signals of a
     constant shape, using filters of the same shape : 16x16 RGB image patches,
@@ -88,8 +88,8 @@ class Codebook(object):
             filter_shape = (filter_shape, )
 
         self.filters = rng.randn(num_filters, *filter_shape)
-        for w in self.filters:
-            w /= numpy.linalg.norm(w)
+        for f in self.filters:
+            f /= numpy.linalg.norm(f)
 
     def encode(self, signal, min_coeff=0., max_num_coeffs=-1, noise=0.):
         '''Encode a signal as a sequence of index, coefficient pairs.
@@ -106,11 +106,14 @@ class Codebook(object):
 
         Generates a sequence of (index, coefficient) tuples.
         '''
-        scores = numpy.array([(signal * w).sum() for w in self.filters])
+        scores = numpy.array([(signal * f).sum() for f in self.filters])
+
         blur = noise * rng.randn(*scores.shape)
+
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
-            if not max_num_coeffs % 100:
+
+            if noise > 0 and 0 == max_num_coeffs % 10:
                 blur = noise * rng.randn(*scores.shape)
 
             index = (scores + blur).argmax()
@@ -124,7 +127,7 @@ class Codebook(object):
 
             scores[index] = -numpy.inf
             mask = numpy.isfinite(scores)
-            scores[mask] = [(signal * w).sum() for w in self.filters[mask]]
+            scores[mask] = [(signal * f).sum() for f in self.filters[mask]]
 
             yield index, coeff
 
@@ -157,7 +160,7 @@ class Codebook(object):
         '''
         # set up a circular buffer (2x the max length of a codebook vector).
         # http://mail.scipy.org/pipermail/scipy-user/2009-February/020108.html
-        N = max(len(w) for w in self.filters)
+        N = max(len(f) for f in self.filters)
         frame = self.filters[0][0]
         memory = numpy.zeros((2 * N, ) + frame.shape, frame.dtype)
         m = 0
@@ -180,8 +183,10 @@ class Codebook(object):
             # calculate coefficients starting at offset m - N.
             window = memory[m - N:m]
             scores = numpy.array(
-                [(window[:len(w)] * w).sum() for w in self.filters])
+                [(window[:len(f)] * f).sum() for f in self.filters])
+
             blur = noise * rng.randn(*scores.shape)
+
             encoding = []
             while True:
                 index = (scores + blur).argmax()
@@ -191,8 +196,8 @@ class Codebook(object):
                         'halting: coefficient %.2f < %.2f', coeff, min_coeff)
                     break
                 encoding.append((index, coeff))
-                w = self.filters[index]
-                window[:len(w)] -= coeff * w
+                f = self.filters[index]
+                window[:len(f)] -= coeff * f
             yield tuple(encoding)
 
     def decode_frames(self, tuples):
@@ -203,7 +208,7 @@ class Codebook(object):
         Generates a sequence of signal frames at the same rate as the input
         (encoded) tuples.
         '''
-        N = max(len(w) for w in self.filters)
+        N = max(len(f) for f in self.filters)
         frame = self.filters[0][0]
         acc = numpy.zeros((2 * N, ) + frame.shape, frame.dtype)
         m = 0
@@ -216,8 +221,8 @@ class Codebook(object):
             if m < N or not tup:
                 continue
             index, coeff = tup
-            w = self.filters[index]
-            acc[m - len(w):m] += coeff * w
+            f = self.filters[index]
+            acc[m - len(f):m] += coeff * f
 
 
 class Trainer(object):
@@ -251,14 +256,13 @@ class Trainer(object):
         Returns a pair of (gradient, activity), where activity is the sum of the
         coefficients for each codebook filter.
         '''
-        grad = [numpy.zeros_like(w) for w in self.codebook.filters]
+        grad = [numpy.zeros_like(f) for f in self.codebook.filters]
         activity = numpy.zeros((len(grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
-            encoding = list(self.codebook.encode(
-                s, self.min_coeff, self.max_num_coeffs, self.noise))
-            for index, coeff, error in self._calculate_gradient(
-                    s - self.codebook.decode(encoding, s.shape), encoding):
+            enc = self.codebook.encode(
+                s, self.min_coeff, self.max_num_coeffs, self.noise)
+            for index, coeff, error in self._calculate_gradient(s, enc):
                 grad[index] += coeff * error
                 activity[index] += coeff
         return grad, activity
@@ -276,9 +280,9 @@ class Trainer(object):
         '''
         for i, g in enumerate(grad):
             logging.debug('filter %d: |gradient| %.2f', i, numpy.linalg.norm(g))
-            w = self.codebook.filters[i]
-            w += learning_rate * g
-            w /= numpy.linalg.norm(w)
+            f = self.codebook.filters[i]
+            f += learning_rate * g
+            f /= numpy.linalg.norm(f)
 
     def resample(self, activity, min_activity_ratio=0.1):
         '''Create new filters to replace "inactive" ones.
@@ -301,7 +305,7 @@ class Trainer(object):
         logging.debug('median filter activity: %.1f', median)
         min_act = min_activity_ratio * median
 
-        shapes = numpy.array([w.shape for w in self.codebook.filters])
+        shapes = numpy.array([f.shape for f in self.codebook.filters])
         mu = shapes.mean(axis=0)
         sigma = shapes.std(axis=0)
 
@@ -309,8 +313,8 @@ class Trainer(object):
             logging.debug('filter %d: activity %.1f', i, act)
             if act < min_act:
                 shape = rng.multivariate_normal(mu, numpy.diag(sigma))
-                w = self.codebook.filters[i] = rng.randn(*shape)
-                w /= numpy.linalg.norm(w)
+                f = self.codebook.filters[i] = rng.randn(*shape)
+                f /= numpy.linalg.norm(f)
 
     def resize(self, padding, shrink, grow):
         '''Resize the filters in our codebook.
@@ -326,9 +330,8 @@ class Trainer(object):
         if not 0 < padding < 0.5:
             return
         for i in range(len(self.codebook.filters)):
-            self._resize(i, padding, shrink, grow)
-            w = self.codebook.filters[i]
-            w /= numpy.linalg.norm(w)
+            f = self.codebook.filters[i] = self._resize(i, padding, shrink, grow)
+            f /= numpy.linalg.norm(f)
 
     def _resize(self, i, padding, shrink, grow):
         '''Resize codebook vector i using some energy heuristics.
@@ -344,7 +347,7 @@ class Trainer(object):
 
         This function is a no-op for the Trainer class.
         '''
-        return
+        return self.codebook.filters[i]
 
     def learn(self, signal, learning_rate):
         '''Calculate and apply a gradient from the given signal.
@@ -380,19 +383,19 @@ class TemporalCodebook(Codebook):
 
     The encoding process is recursive. Given a signal x(t) of length T that
     varies along dimension t, we calculate the inner product of each codebook
-    filter w(t) with x(t - o) for all 0 < o < T - len(w), and then choose the
-    filter w and offset o that result in the largest magnitude coefficient c. We
-    subtract c * w(t) from x(t - o) and repeat the process with the new x(t).
+    filter f(t) with x(t - o) for all 0 < o < T - len(f), and then choose the
+    filter f and offset o that result in the largest magnitude coefficient c. We
+    subtract c * f(t) from x(t - o) and repeat the process with the new x(t).
     More formally,
 
       x_1(t) = x(t)
-      w_n, o_n = argmax_{w,o} <x_n(t - o), w>
-      c_n = <x_n(t - o_n), w_n>
-      x_{n+1}(t) = x_n(t - o_n) - c_n * w_n
+      f_n, o_n = argmax_{f,o} <x_n(t - o), f>
+      c_n = <x_n(t - o_n), f_n>
+      x_{n+1}(t) = x_n(t - o_n) - c_n * f_n
 
     where <a(t - o), b> denotes the inner product between a at offset o and b.
     (We use the correlation function to automate the dot product calculations at
-    all offsets o.) The encoding consists of triples (w, c, o) for as many time
+    all offsets o.) The encoding consists of triples (f, c, o) for as many time
     steps n as desired. Reconstruction of the signal requires the codebook that
     was used at encoding time, plus a sequence of encoding triples: the
     reconstructed signal is just the weighted sum of the codebook filters at the
@@ -448,22 +451,23 @@ class TemporalCodebook(Codebook):
         to update the codebook filters.
         '''
         width = signal.shape[0]
-        shapes = [w.shape[0] for w in self.filters]
+        shapes = [f.shape[0] for f in self.filters]
 
         # we cache the correlations between signal and codebook to avoid
         # redundant computation.
         shape = (len(self.filters), width - min(shapes) + 1)
-        scores = numpy.zeros(shape, float)
-        for i, w in enumerate(self.filters):
-            self._correlate(signal, w, scores[i, :width - len(w) + 1])
+        scores = numpy.zeros(shape, float) - numpy.inf
+        for i, f in enumerate(self.filters):
+            self._correlate(signal, f, scores[i, :width - shapes[i] + 1])
 
-        blur = noise * rng.randn(*shape)
+        blur = noise * rng.randn(*scores.shape)
 
         amplitude = abs(signal).sum()
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
-            if not max_num_coeffs % 100:
-                blur = noise * rng.randn(*shape)
+
+            if noise > 0 and 0 == max_num_coeffs % 10:
+                blur = noise * rng.randn(*scores.shape)
 
             # find the largest coefficient, check that it's large enough.
             index, offset = numpy.unravel_index(
@@ -489,13 +493,16 @@ class TemporalCodebook(Codebook):
             amplitude = a
 
             # update the correlation cache for the changed part of signal.
-            for i, w in enumerate(self.filters):
+            for i, f in enumerate(self.filters):
                 l = shapes[i] - 1
                 o = max(0, offset - l)
                 p = min(end, len(signal) - l)
-                self._correlate(signal[o:end + l], w, scores[i, o:p])
+                self._correlate(signal[o:end + l], f, scores[i, o:p])
 
             yield index, coeff, offset
+
+        else:
+            logging.debug('halting: final coefficient %.2f', coeff)
 
     def decode(self, coefficients, signal_shape):
         '''Decode a dictionary of codebook coefficients as a signal.
@@ -508,8 +515,8 @@ class TemporalCodebook(Codebook):
         '''
         signal = numpy.zeros(signal_shape, float)
         for index, coeff, offset in coefficients:
-            w = self.filters[index]
-            signal[offset:offset + len(w)] += coeff * w
+            f = self.filters[index]
+            signal[offset:offset + len(f)] += coeff * f
         return signal
 
 
@@ -518,9 +525,9 @@ class TemporalTrainer(Trainer):
 
     def _calculate_gradient(self, error, encoding):
         '''Calculate the gradient from one encoding of a signal.'''
-        for index, coeff, x in encoding:
-            w = self.codebook.filters[index].shape[0]
-            yield index, coeff, error[x:x + w]
+        for index, coeff, offset in encoding:
+            f = self.codebook.filters[index]
+            yield index, coeff, error[offset:offset + len(f)]
 
     def _resize(self, i, padding, shrink, grow):
         '''Resize codebook vector i using some energy heuristics.
@@ -534,16 +541,16 @@ class TemporalTrainer(Trainer):
         grow: Add padding to a codebook filter when signal in the padding
           exceeds this threshold.
         '''
-        z = abs(self.codebook.filters[i])
-        p = int(numpy.ceil(len(z) * padding))
-        criterion = numpy.concatenate([z[:p], z[-p:]]).max()
+        f = self.codebook.filters[i]
+        p = int(numpy.ceil(len(f) * padding))
+        criterion = abs(numpy.concatenate([f[:p], f[-p:]])).max()
         logging.debug('filter %d: resize criterion %.3f', i, criterion)
-        if criterion < shrink and len(self.codebook.filters[i]) > 1 + 2 * p:
-            self.codebook.filters[i] = self.codebook.filters[i][p:-p]
+        if criterion < shrink and len(f) > 1 + 2 * p:
+            return f[p:-p]
         if criterion > grow:
-            pad = numpy.zeros((p, ) + z.shape[1:], z.dtype)
-            self.codebook.filters[i] = numpy.concatenate(
-                [pad, self.codebook.filters[i], pad])
+            pad = numpy.zeros((p, ) + f.shape[1:], f.dtype)
+            return numpy.concatenate([pad, f, pad])
+        return f
 
 
 class SpatialCodebook(Codebook):
@@ -592,25 +599,26 @@ class SpatialCodebook(Codebook):
         results to update the codebook filters.
         '''
         width, height = signal.shape[:2]
-        shapes = [w.shape[:2] for w in self.filters]
+        shapes = [f.shape[:2] for f in self.filters]
 
         # we cache the correlations between signal and codebook to avoid
         # redundant computation.
         shape = (len(self.filters),
                  width - min(w for w, _ in shapes) + 1,
                  height - min(h for _, h in shapes) + 1)
-        scores = numpy.zeros(shape, float)
-        for i, w in enumerate(self.filters):
-            x, y = shapes[i]
-            self._correlate(signal, w, scores[i, :width-x+1, :height-y+1])
+        scores = numpy.zeros(shape, float) - numpy.inf
+        for i, f in enumerate(self.filters):
+            w, h = shapes[i]
+            self._correlate(signal, f, scores[i, :width-w+1, :height-h+1])
 
-        blur = noise * rng.randn(*shape)
+        blur = noise * rng.randn(*scores.shape)
 
         amplitude = abs(signal).sum()
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
-            if not max_num_coeffs % 100:
-                blur = noise * rng.randn(*shape)
+
+            if noise > 0 and 0 == max_num_coeffs % 10:
+                blur = noise * rng.randn(*scores.shape)
 
             # find the largest coefficient, check that it's large enough.
             index, x, y = numpy.unravel_index(
@@ -637,14 +645,17 @@ class SpatialCodebook(Codebook):
             amplitude = a
 
             # update the correlation cache for the changed part of signal.
-            for i, w in enumerate(self.filters):
+            for i, f in enumerate(self.filters):
                 wx, wy = shapes[i][0] - 1, shapes[i][1] - 1
                 ox, oy = max(0, x - wx), max(0, y - wy)
                 px, py = min(ex, width - wx), min(ey, height - wy)
                 self._correlate(
-                    signal[ox:ex + wx, oy:ey + wy], w, scores[i, ox:px, oy:py])
+                    signal[ox:ex + wx, oy:ey + wy], f, scores[i, ox:px, oy:py])
 
             yield index, coeff, (x, y)
+
+        else:
+            logging.debug('halting: final coefficient %.2f', coeff)
 
     def decode(self, coefficients, signal_shape):
         '''Decode a dictionary of codebook coefficients as a signal.
@@ -657,9 +668,9 @@ class SpatialCodebook(Codebook):
         '''
         signal = numpy.zeros(signal_shape, float)
         for index, coeff, (x, y) in coefficients:
-            w = self.filters[index]
-            a, b = w.shape[:2]
-            signal[x:x + a, y:y + b] += coeff * w
+            f = self.filters[index]
+            w, h = f.shape[:2]
+            signal[x:x + w, y:y + h] += coeff * f
         return signal
 
 
@@ -684,18 +695,21 @@ class SpatialTrainer(Trainer):
         grow: Add padding to a codebook filter when signal in the padding
           exceeds this threshold.
         '''
-        z = abs(self.codebook.filters[i])
-        w, h = z.shape[:2]
+        f = self.codebook.filters[i]
+        w, h = f.shape[:2]
         p = int(numpy.ceil(w * padding))
         q = int(numpy.ceil(h * padding))
-        criterion = numpy.concatenate([
-            z[:p].flatten(), z[-p:].flatten(),
-            z[:, :q].flatten(), z[:, -q:].flatten()]).max()
+        criterion = abs(numpy.concatenate([
+            f[:p].flatten(),
+            f[-p:].flatten(),
+            f[p:-p, :q].flatten(),
+            f[p:-p, -q:].flatten()])).max()
         logging.debug('filter %d: resize criterion %.3f', i, criterion)
         if criterion < shrink and w > 1 + 2 * p and h > 1 + 2 * q:
-            self.codebook.filters[i] = self.codebook.filters[i][p:-p, q:-q]
+            return f[p:-p, q:-q]
         if criterion > grow:
-            ppad = numpy.zeros((p, h) + z.shape[2:], z.dtype)
-            qpad = numpy.zeros((2 * p + w, q) + z.shape[2:], z.dtype)
-            self.codebook.filters[i] = numpy.hstack(
-                [qpad, numpy.concatenate([ppad, self.codebook.filters[i], ppad]), qpad])
+            ppad = numpy.zeros((p, h) + f.shape[2:], f.dtype)
+            qpad = numpy.zeros((2 * p + w, q) + f.shape[2:], f.dtype)
+            return numpy.hstack(
+                [qpad, numpy.concatenate([ppad, f, ppad]), qpad])
+        return f
