@@ -119,8 +119,8 @@ class Codebook(object):
             index = (scores + blur).argmax()
             coeff = scores[index]
             if coeff < min_coeff:
-                logging.debug(
-                    'halting: coefficient %.2f < %.2f', coeff, min_coeff)
+                logging.debug('halting: coefficient %d is %.2f < %.2f',
+                              -max_num_coeffs, coeff, min_coeff)
                 break
 
             signal -= coeff * self.filters[index]
@@ -130,6 +130,10 @@ class Codebook(object):
             scores[mask] = [(signal * f).sum() for f in self.filters[mask]]
 
             yield index, coeff
+
+        else:
+            logging.debug(
+                'halting: final coefficient %d is %.2f', -max_num_coeffs, coeff)
 
     def decode(self, encoding, unused_shape):
         '''Decode an encoding of a static signal.
@@ -192,8 +196,8 @@ class Codebook(object):
                 index = (scores + blur).argmax()
                 coeff = scores[index]
                 if coeff < min_coeff:
-                    logging.debug(
-                        'halting: coefficient %.2f < %.2f', coeff, min_coeff)
+                    logging.debug('halting: coefficient %d is %.2f < %.2f',
+                                  -max_num_coeffs, coeff, min_coeff)
                     break
                 encoding.append((index, coeff))
                 f = self.filters[index]
@@ -475,8 +479,8 @@ class TemporalCodebook(Codebook):
             end = offset + shapes[index]
             coeff = scores[index, offset]
             if coeff < min_coeff:
-                logging.debug(
-                    'halting: coefficient %.2f < %.2f', coeff, min_coeff)
+                logging.debug('halting: coefficient %d is %.2f < %.2f',
+                              -max_num_coeffs, coeff, min_coeff)
                 break
 
             # check that using this filter does not increase signal amplitude by
@@ -502,7 +506,8 @@ class TemporalCodebook(Codebook):
             yield index, coeff, offset
 
         else:
-            logging.debug('halting: final coefficient %.2f', coeff)
+            logging.debug(
+                'halting: final coefficient %d is %.2f', -max_num_coeffs, coeff)
 
     def decode(self, coefficients, signal_shape):
         '''Decode a dictionary of codebook coefficients as a signal.
@@ -543,7 +548,7 @@ class TemporalTrainer(Trainer):
         '''
         f = self.codebook.filters[i]
         p = int(numpy.ceil(len(f) * padding))
-        criterion = abs(numpy.concatenate([f[:p], f[-p:]])).max()
+        criterion = abs(numpy.concatenate([f[:p], f[-p:]])).mean()
         logging.debug('filter %d: resize criterion %.3f', i, criterion)
         if criterion < shrink and len(f) > 1 + 2 * p:
             return f[p:-p]
@@ -627,8 +632,8 @@ class SpatialCodebook(Codebook):
             ey = y + shapes[index][1]
             coeff = scores[index, x, y]
             if coeff < min_coeff:
-                logging.debug(
-                    'halting: coefficient %.2f < %.2f', coeff, min_coeff)
+                logging.debug('halting: coefficient %d is %.2f < %.2f',
+                              -max_num_coeffs, coeff, min_coeff)
                 break
 
             # check that using this filter does not increase signal amplitude by
@@ -655,7 +660,8 @@ class SpatialCodebook(Codebook):
             yield index, coeff, (x, y)
 
         else:
-            logging.debug('halting: final coefficient %.2f', coeff)
+            logging.debug(
+                'halting: final coefficient %d is %.2f', -max_num_coeffs, coeff)
 
     def decode(self, coefficients, signal_shape):
         '''Decode a dictionary of codebook coefficients as a signal.
@@ -703,7 +709,7 @@ class SpatialTrainer(Trainer):
             f[:p].flatten(),
             f[-p:].flatten(),
             f[p:-p, :q].flatten(),
-            f[p:-p, -q:].flatten()])).max()
+            f[p:-p, -q:].flatten()])).mean()
         logging.debug('filter %d: resize criterion %.3f', i, criterion)
         if criterion < shrink and w > 1 + 2 * p and h > 1 + 2 * q:
             return f[p:-p, q:-q]
