@@ -38,7 +38,7 @@ class Codebook(codebook.Codebook):
           signal (and the filters). Leave this set to 0 if your 2D signals
           have just two values in their shape tuples.
         '''
-        super(SpatialCodebook, self).__init__(
+        super(Codebook, self).__init__(
             num_filters, filter_shape + ((channels, ) if channels else ()))
 
         self.filters = list(self.filters)

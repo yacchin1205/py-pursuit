@@ -65,7 +65,7 @@ class Codebook(codebook.Codebook):
           our initial codebook.
         frame_shape: The shape of each frame of data that we will encode.
         '''
-        super(TemporalCodebook, self).__init__(
+        super(Codebook, self).__init__(
             num_filters, (filter_frames, ) + frame_shape)
 
         self.filters = list(self.filters)
