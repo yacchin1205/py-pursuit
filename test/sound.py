@@ -115,8 +115,8 @@ def evaluate(train, test, width, codebook=10):
 
     # continuous
     seq = 0
-    c = lmj.pursuit.TemporalCodebook(codebook, width)
-    t = lmj.pursuit.TemporalTrainer(c, max_num_coeffs=500, noise=0.1)
+    c = lmj.pursuit.temporal.Codebook(codebook, width)
+    t = lmj.pursuit.temporal.Trainer(c, max_num_coeffs=500, noise=0.1)
     for _ in range(4):
         _, activity = t.learn(train, 0.3)
         t.resize(0.1, 0.01, 0.001)

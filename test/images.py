@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import os
 import sys
 import numpy
 import glumpy
@@ -30,6 +31,7 @@ import PIL.Image
 import collections
 import numpy.random as rng
 
+sys.path.append(os.path.join(os.path.dirname(__file__), os.pardir))
 import lmj.pursuit
 
 FLAGS = optparse.OptionParser()
@@ -96,8 +98,8 @@ class Simulator(object):
 
         F = opts.filters
         S = opts.filter_size
-        self.codebook = lmj.pursuit.SpatialCodebook(F * F, (S, S))
-        self.trainer = lmj.pursuit.SpatialTrainer(self.codebook)
+        self.codebook = lmj.pursuit.spatial.Codebook(F * F, (S, S))
+        self.trainer = lmj.pursuit.spatial.Trainer(self.codebook)
         self.activity = numpy.zeros((F * F, ), float)
 
         w = max(x.shape[0] for x in self.images)
