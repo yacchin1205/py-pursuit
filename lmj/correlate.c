@@ -309,11 +309,11 @@ static PyObject *correlate2d_from_rgb(PyObject *self, PyObject *args) {
     /* TODO: see if we can incorporate a perceptually motivated "distance" for
      * RGB like this one from http://www.compuphase.com/cmetric.htm :
      *
-     *   r = (c1[r] + c2[r]) / 2
+     *   m = (c1[r] + c2[r]) / 2
      *   d = c1 - c2
-     *   dist = sqrt((2 + r / 256) * d[r] * d[r] +
+     *   dist = sqrt((2 + m / 256) * d[r] * d[r] +
      *               4 * d[g] * d[g] +
-     *               (2 + (255 - r) / 256) * d[b] * d[b])
+     *               (2 + (255 - m) / 256) * d[b] * d[b])
      */
     double const * const s = (double *) signal->data;
     double const * const f = (double *) filter->data;
