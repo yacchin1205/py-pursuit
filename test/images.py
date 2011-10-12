@@ -41,7 +41,6 @@ FLAGS.add_option('-n', '--max-num-coeffs', type=int, default=-1)
 FLAGS.add_option('-f', '--filters', type=int, default=7)
 FLAGS.add_option('-F', '--filter-size', type=int, default=16)
 FLAGS.add_option('-r', '--learning-rate', type=float, default=0.05)
-FLAGS.add_option('-z', '--noise', type=float, default=0.1)
 
 FLAGS.add_option('-s', '--save-frames', type=int, default=0)
 
@@ -148,8 +147,7 @@ class Simulator(object):
         for index, coeff, (x, y) in self.codebook.encode(
                 pixels,
                 min_coeff=self.min_coeff,
-                max_num_coeffs=self.opts.max_num_coeffs,
-                noise=self.opts.noise):
+                max_num_coeffs=self.opts.max_num_coeffs):
             encoding.append((index, coeff, x, y))
             a, b = numpy.unravel_index(index, (opts.filters, opts.filters))
             w, h = self.codebook.filters[index].shape[:2]
