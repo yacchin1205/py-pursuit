@@ -30,15 +30,17 @@ number of filters have been used, or until the maximal filter response drops
 below some threshold. The encoding thus represents a signal as a weighted sum of
 filters, with many of the weights being zero.
 
-This module contains three implementations of matching pursuit: one for encoding
+This module contains two implementations of matching pursuit: one for encoding
 signals of a fixed shape using filters of the same shape (the Codebook class),
-another for encoding signals composed of frames arranged along one dimension
-(the TemporalCodebook class), and a third for encoding signals that vary in size
-along two dimensions (the SpatialCodebook class). Each implementation comes
-with an associated Trainer class that encapsulates the logic involved with basic
-gradient-ascent training for the filters.
+and another for encoding signals and filters of the same number of dimensions,
+using correlations across dimensions (the correlation.Codebook class). Each
+implementation comes with an associated Trainer class that encapsulates the
+logic involved with basic gradient-ascent training for the filters.
+
+An experimental CUDA implementation of the correlation approach is also
+included ; to use it, "import lmj.pursuit.cuda" and then use the Codebook class
+in that module.
 '''
 
 from codebook import Codebook, Trainer
-import temporal
-import spatial
+import correlation
