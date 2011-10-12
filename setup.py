@@ -5,7 +5,7 @@ setuptools.setup(
     version='0.3',
     install_requires=['numpy'],
     namespace_packages=['lmj'],
-    packages=['lmj.pursuit'],
+    packages=setuptools.find_packages(),
     ext_modules=[setuptools.Extension('lmj.pursuit._correlate', sources=['lmj/pursuit/correlate.c'])],
     author='Leif Johnson',
     author_email='leif@leifjohnson.net',
