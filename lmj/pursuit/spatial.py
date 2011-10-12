@@ -27,9 +27,9 @@ import codebook
 
 
 class Codebook(codebook.Codebook):
-    '''A matching pursuit for encoding images or other 2D signals.'''
+    '''A matching pursuit for encoding signals.'''
 
-    def __init__(self, num_filters, filter_shape, channels=0):
+    def __init__(self, num_filters, filter_shape):
         '''Initialize a new codebook of static filters.
 
         num_filters: The number of filters to build in the codebook.
@@ -39,16 +39,14 @@ class Codebook(codebook.Codebook):
           signal (and the filters). Leave this set to 0 if your 2D signals
           have just two values in their shape tuples.
         '''
-        super(Codebook, self).__init__(
-            num_filters, filter_shape + ((channels, ) if channels else ()))
+        super(Codebook, self).__init__(num_filters, filter_shape)
 
         self.filters = list(self.filters)
 
         self._correlate = codebook.default_correlate
-        if codebook.have_correlate and channels == 0:
-            self._correlate = codebook._correlate.correlate2d
-        if codebook.have_correlate and channels == 3:
-            self._correlate = codebook._correlate.correlate2d_from_rgb
+        if codebook.have_correlate and len(filter_shape) < 4:
+            self._correlate = codebook._correlate.getattr(
+                'correlate%dd' % len(filter_shape))
 
     def encode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Generate a set of codebook coefficients for encoding a signal.
