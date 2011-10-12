@@ -100,7 +100,7 @@ def evaluate(train, test, width, codebook=10):
     # windowed
     seq = 0
     c = lmj.pursuit.Codebook(codebook, width)
-    t = lmj.pursuit.Trainer(c, max_num_coeffs=1, noise=0.1)
+    t = lmj.pursuit.Trainer(c, max_num_coeffs=1)
     for _ in range(4):
         for w in random_windows(500, train, width):
             t.learn(w, 0.3)
@@ -115,8 +115,8 @@ def evaluate(train, test, width, codebook=10):
 
     # continuous
     seq = 0
-    c = lmj.pursuit.temporal.Codebook(codebook, width)
-    t = lmj.pursuit.temporal.Trainer(c, max_num_coeffs=500, noise=0.1)
+    c = lmj.pursuit.correlation.Codebook(codebook, width)
+    t = lmj.pursuit.correlation.Trainer(c, max_num_coeffs=500)
     for _ in range(4):
         _, activity = t.learn(train, 0.3)
         t.resize(0.1, 0.01, 0.001)

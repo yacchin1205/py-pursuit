@@ -98,8 +98,8 @@ class Simulator(object):
 
         F = opts.filters
         S = opts.filter_size
-        self.codebook = lmj.pursuit.spatial.Codebook(F * F, (S, S))
-        self.trainer = lmj.pursuit.spatial.Trainer(self.codebook)
+        self.codebook = lmj.pursuit.correlation.Codebook(F * F, (S, S))
+        self.trainer = lmj.pursuit.correlation.Trainer(self.codebook)
         self.activity = numpy.zeros((F * F, ), float)
 
         w = max(x.shape[0] for x in self.images)

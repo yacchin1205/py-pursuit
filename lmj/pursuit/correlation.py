@@ -68,9 +68,10 @@ class Codebook(codebook.Codebook):
         super(Codebook, self).__init__(num_filters, filter_shape)
 
         try:
-            self._correlate = _correlate.getattr(
-                'correlate%dd' % len(filter_shape))
-        except:
+            self._correlate = getattr(
+                _correlate, 'correlate%dd' % len(self.filters[0].shape))
+        except Exception, e:
+            logging.exception('error')
             self._correlate = _default_correlate
 
     def encode(self, signal, min_coeff=0., max_num_coeffs=-1):
@@ -96,7 +97,7 @@ class Codebook(codebook.Codebook):
 
         # we cache the correlations between signal and codebook to avoid
         # redundant computation.
-        shape = tuple(signal_shape - shapes.min(axis=0) + 1)
+        shape = tuple(signal_shape - filter_shapes.min(axis=0) + 1)
         scores = numpy.zeros((len(self.filters), ) + shape, float) - numpy.inf
         for i, f in enumerate(self.filters):
             target = (slice(0, x) for x in signal_shape - filter_shapes[i] + 1)
@@ -132,13 +133,34 @@ class Codebook(codebook.Codebook):
             amplitude = a
 
             # update the correlation cache for the changed part of signal.
+            #
+            # we just changed the signal in the "affected region" from offset to
+            # offset + filter_shape[index]. so we need to update the scores for
+            # that region. to do that, we need that corresponding part of the
+            # signal, plus all the "fringe" areas that the filters will overlap
+            # during the correlation computation.
+            #
+            # so, we wrap up the offset, filter shape, and signal shape. for
+            # each dimension, we start both the scores and the signal region at
+            # offset - filter_shape + 1, clipped to 0. (in my code, the
+            # correlation always shares the same starting point, while the end
+            # absorbs all of the fringe.)
+            #
+            # we end the source region for the signal at (offset + filter_shape)
+            # + filter_shape - 1, basically the end of the affected region
+            # plus the overlap due to the filter, clipped to the signal_shape.
+            #
+            # we end the target region for the scores at the end of the affected
+            # region (offset + filter_shape), clipped to the end of the valid
+            # signal region (signal_shape - filter_shape + 1).
             for i, f in enumerate(self.filters):
-                source = tuple(slice(max(0, o - fs + 1), o + fs + fs - 1)
-                               for o, fs in zip(offset, filter_shape[i]))
-                target = tuple(
-                    slice(max(0, o - fs + 1), min(o + fs, ss - fs + 1))
-                    for o, fs, ss in zip(offset, shape, signal_shape))
-                self._correlate(signal[source], f, scores[(i, ) + target])
+                source = []
+                target = [i]
+                for o, fs, ss in zip(offset, filter_shapes[i], signal_shape):
+                    a = max(0, o - fs + 1)
+                    source.append(slice(a, min(ss, o + fs + fs - 1)))
+                    target.append(slice(a, min(o + fs, ss - fs + 1)))
+                self._correlate(signal[tuple(source)], f, scores[tuple(target)])
 
             yield index, coeff, offset
 
@@ -186,9 +208,13 @@ class Trainer(codebook.Trainer):
         grow: Add padding to a codebook filter when signal in the padding
           exceeds this threshold.
         '''
-        for i, f in enumerate(self.codebook.filters):
-            f[:] = self._resize(i, paddings, shrink, grow)
-            f /= numpy.linalg.norm(f)
+        fs = self.codebook.filters
+        if isinstance(paddings, (int, float)):
+            paddings = [paddings] * fs[0].ndim
+        assert len(paddings) == fs[0].ndim
+        for i, f in enumerate(fs):
+            fs[i] = self._resize(i, paddings, shrink, grow)
+            fs[i] /= numpy.linalg.norm(fs[i])
 
     def _resize(self, i, paddings, shrink, grow):
         '''Resize codebook vector i using a signal magnitude heuristic.
@@ -205,7 +231,7 @@ class Trainer(codebook.Trainer):
         f = self.codebook.filters[i]
         for j, p in enumerate(paddings):
             s = f.shape[j]
-            p = int(numpy.ceil(s * padding))
+            p = int(numpy.ceil(s * p))
             if not p:
                 continue
             w = tuple(slice(None) for _ in range(j))
@@ -215,6 +241,6 @@ class Trainer(codebook.Trainer):
             if criterion < shrink and s > 1 + 2 * p:
                 f = f[w + (slice(p, -p), )]
             if criterion > grow:
-                pad = numpy.zeros(f.shape[:j] + f.shape[j+1:], f.dtype)
+                pad = numpy.zeros(f.shape[:j] + (p, ) + f.shape[j+1:], f.dtype)
                 f = numpy.append(numpy.append(pad, f, axis=j), pad, axis=j)
         return f

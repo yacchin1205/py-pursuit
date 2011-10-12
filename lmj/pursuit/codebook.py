@@ -296,5 +296,5 @@ class Trainer(object):
         '''
         return self.codebook.decode(
             self.codebook.encode(
-                signal.copy(), self.min_coeff, self.max_num_coeffs, 0.),
+                signal.copy(), self.min_coeff, self.max_num_coeffs),
             signal.shape)
