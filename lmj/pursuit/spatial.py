@@ -25,28 +25,53 @@ from itertools import izip as zip
 
 import codebook
 
+_correlate = None
+try:
+    import _correlate
+except ImportError:
+    logging.info('cannot import _correlate module, trying scipy')
+    import scipy.signal
+
+def _default_correlate(s, f, r):
+    '''Assign to r the values from scipy.signal.correlate(s, f).'''
+    r[:] = scipy.signal.correlate(s, f, 'valid')
+
 
 class Codebook(codebook.Codebook):
-    '''A matching pursuit for encoding signals.'''
+    '''A matching pursuit for encoding signals using pointwise correlation.
+
+    The basic matching pursuit encodes signals that are the same size as the
+    filters in the codebook. This implementation generalizes that process so
+    that filters and signals must only share the same number of dimensions.
+    Additionally, signals must be the same size or larger than all codebook
+    filters in all dimensions, but this is the normal case -- we usually encode
+    100x100 images using small 8x8 or 16x16, etc. filter patches, for instance.
+
+    In addition to generating the codebook filter index, and the corresponding
+    coefficient, this implementation correlates each filter across the entire
+    signal, generating the maximally responding codebook filter, coefficient,
+    and offset. The decoded signal is then a weighted reconstruction of filters
+    offset by the appropriate number of samples in each dimension.
+
+    Additionally, because codebook filters are correlated across the signals, we
+    can resize codebook vectors if necessary to capture more information in the
+    dataset being learned. See the Trainer.resize method for details.
+    '''
 
     def __init__(self, num_filters, filter_shape):
-        '''Initialize a new codebook of static filters.
+        '''Initialize a new codebook of filters.
 
         num_filters: The number of filters to build in the codebook.
         filter_shape: A tuple of integers that specifies the shape of the
           filters in the codebook.
-        channels: Set this to the number of channels in each element of the
-          signal (and the filters). Leave this set to 0 if your 2D signals
-          have just two values in their shape tuples.
         '''
         super(Codebook, self).__init__(num_filters, filter_shape)
 
-        self.filters = list(self.filters)
-
-        self._correlate = codebook.default_correlate
-        if codebook.have_correlate and len(filter_shape) < 4:
-            self._correlate = codebook._correlate.getattr(
+        try:
+            self._correlate = _correlate.getattr(
                 'correlate%dd' % len(filter_shape))
+        except:
+            self._correlate = _default_correlate
 
     def encode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Generate a set of codebook coefficients for encoding a signal.
@@ -59,12 +84,12 @@ class Codebook(codebook.Codebook):
           reached.
 
         This method generates a sequence of tuples of the form (index,
-        coefficient, (x offset, y offset)), where index refers to a codebook
-        filter and coefficient is the scalar multiple of the filter that is
-        present in the input signal starting at the given offsets.
+        coefficient, offset), where index refers to a codebook filter and
+        coefficient is the scalar multiple of the filter that is present in the
+        input signal starting at the given offsets.
 
-        See the SpatialTrainer class for an example of how to use these
-        results to update the codebook filters.
+        See the Trainer class for an example of how to use these results to
+        update the codebook filters.
         '''
         signal_shape = numpy.array(signal.shape)
         filter_shapes = numpy.array([f.shape for f in self.filters])
@@ -108,8 +133,6 @@ class Codebook(codebook.Codebook):
 
             # update the correlation cache for the changed part of signal.
             for i, f in enumerate(self.filters):
-                o = max(0, offset - filter_shape[i] + 1)
-                p = min(offset + filter_shapes[i], signal_shape - filter_shapes[i] + 1)
                 source = tuple(slice(max(0, o - fs + 1), o + fs + fs - 1)
                                for o, fs in zip(offset, filter_shape[i]))
                 target = tuple(
@@ -150,33 +173,48 @@ class Trainer(codebook.Trainer):
             region = tuple(slice(o, o + s) for o, s in zip(offset, f.shape))
             yield index, coeff, error[region]
 
-    def _resize(self, i, padding, shrink, grow):
-        '''Resize codebook vector i using some energy heuristics.
+    def resize(self, paddings, shrink, grow):
+        '''Resize the filters in our codebook.
+
+        paddings: For each axis in our filters, this provides a floating point
+          proportion of each codebook filter to consider as "padding"
+          when growing or shrinking along this axis. Typically 0.1 or so. Values
+          of 0 in the sequence disable growing or shrinking of the codebook
+          filters along the associated axis.
+        shrink: Remove the padding from a codebook filter when the signal in the
+          padding falls below this threshold.
+        grow: Add padding to a codebook filter when signal in the padding
+          exceeds this threshold.
+        '''
+        for i, f in enumerate(self.codebook.filters):
+            f[:] = self._resize(i, paddings, shrink, grow)
+            f /= numpy.linalg.norm(f)
+
+    def _resize(self, i, paddings, shrink, grow):
+        '''Resize codebook vector i using a signal magnitude heuristic.
 
         i: The index of the codebook vector to resize.
-        padding: The proportion of each codebook filter to consider as "padding"
-          when growing or shrinking. Values around 0.1 are usually good. 0
-          disables growing or shrinking of the codebook filters.
+        paddings: For each axis in our filters, this sequence provides the
+          proportion of each codebook filter to consider as "padding"
+          when growing or shrinking.
         shrink: Remove the padding from a codebook filter when the signal in the
           padding falls below this threshold.
         grow: Add padding to a codebook filter when signal in the padding
           exceeds this threshold.
         '''
         f = self.codebook.filters[i]
-        w, h = f.shape[:2]
-        p = int(numpy.ceil(w * padding))
-        q = int(numpy.ceil(h * padding))
-        criterion = abs(numpy.concatenate([
-            f[:p].flatten(),
-            f[-p:].flatten(),
-            f[p:-p, :q].flatten(),
-            f[p:-p, -q:].flatten()])).mean()
-        logging.debug('filter %d: resize criterion %.3f', i, criterion)
-        if criterion < shrink and w > 1 + 2 * p and h > 1 + 2 * q:
-            return f[p:-p, q:-q]
-        if criterion > grow:
-            ppad = numpy.zeros((p, h) + f.shape[2:], f.dtype)
-            qpad = numpy.zeros((2 * p + w, q) + f.shape[2:], f.dtype)
-            return numpy.hstack(
-                [qpad, numpy.concatenate([ppad, f, ppad]), qpad])
+        for j, p in enumerate(paddings):
+            s = f.shape[j]
+            p = int(numpy.ceil(s * padding))
+            if not p:
+                continue
+            w = tuple(slice(None) for _ in range(j))
+            criterion = abs(numpy.append(
+                f[w + (slice(p), )], f[w + (slice(-p, None), )])).mean()
+            logging.debug('filter %d:%d: resize %.3f', i, j, criterion)
+            if criterion < shrink and s > 1 + 2 * p:
+                f = f[w + (slice(p, -p), )]
+            if criterion > grow:
+                pad = numpy.zeros(f.shape[:j] + f.shape[j+1:], f.dtype)
+                f = numpy.append(numpy.append(pad, f, axis=j), pad, axis=j)
         return f

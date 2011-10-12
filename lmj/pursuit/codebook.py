@@ -23,19 +23,6 @@ import logging
 import numpy.random as rng
 
 
-have_correlate = False
-try:
-    import _correlate
-    have_correlate = True
-except ImportError:
-    logging.info('cannot import _correlate module, trying scipy')
-    import scipy.signal
-
-def default_correlate(s, f, r):
-    '''Assign to r the values from scipy.signal.correlate(s, f).'''
-    r[:] = scipy.signal.correlate(s, f, 'valid')
-
-
 class Codebook(object):
     '''Matching pursuit encodes signals using a codebook of filters.
 
@@ -67,7 +54,7 @@ class Codebook(object):
         if not isinstance(filter_shape, (tuple, list)):
             filter_shape = (filter_shape, )
 
-        self.filters = rng.randn(num_filters, *filter_shape)
+        self.filters = [rng.randn(*filter_shape) for _ in range(num_filters)]
         for f in self.filters:
             f /= numpy.linalg.norm(f)
 
@@ -99,7 +86,9 @@ class Codebook(object):
 
             scores[index] = -numpy.inf
             mask = numpy.isfinite(scores)
-            scores[mask] = [(signal * f).sum() for f in self.filters[mask]]
+            scores[mask] = [(signal * f).sum()
+                            for i, f in enumerate(self.filters)
+                            if mask[i]]
 
             yield index, coeff
 
@@ -281,39 +270,6 @@ class Trainer(object):
                 shape = rng.multivariate_normal(mu, numpy.diag(sigma))
                 f = self.codebook.filters[i] = rng.randn(*shape)
                 f /= numpy.linalg.norm(f)
-
-    def resize(self, padding, shrink, grow):
-        '''Resize the filters in our codebook.
-
-        padding: The proportion of each codebook filter to consider as "padding"
-          when growing or shrinking. Values around 0.1 are usually good. 0
-          disables growing or shrinking of the codebook filters.
-        shrink: Remove the padding from a codebook filter when the signal in the
-          padding falls below this threshold.
-        grow: Add padding to a codebook filter when signal in the padding
-          exceeds this threshold.
-        '''
-        if not 0 < padding < 0.5:
-            return
-        for i in range(len(self.codebook.filters)):
-            f = self.codebook.filters[i] = self._resize(i, padding, shrink, grow)
-            f /= numpy.linalg.norm(f)
-
-    def _resize(self, i, padding, shrink, grow):
-        '''Resize codebook vector i using some energy heuristics.
-
-        i: The index of the codebook vector to resize.
-        padding: The proportion of each codebook filter to consider as "padding"
-          when growing or shrinking. Values around 0.1 are usually good. 0
-          disables growing or shrinking of the codebook filters.
-        shrink: Remove the padding from a codebook filter when the signal in the
-          padding falls below this threshold.
-        grow: Add padding to a codebook filter when signal in the padding
-          exceeds this threshold.
-
-        This function is a no-op for the Trainer class.
-        '''
-        return self.codebook.filters[i]
 
     def learn(self, signal, learning_rate):
         '''Calculate and apply a gradient from the given signal.
