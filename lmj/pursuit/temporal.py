@@ -76,7 +76,7 @@ class Codebook(codebook.Codebook):
         if codebook.have_correlate and len(frame_shape) == 1:
             self._correlate = codebook._correlate.correlate1d_from_2d
 
-    def encode(self, signal, min_coeff=0., max_num_coeffs=-1, noise=0.):
+    def encode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Generate a set of codebook coefficients for encoding a signal.
 
         signal: A signal to encode.
@@ -85,9 +85,6 @@ class Codebook(codebook.Codebook):
         max_num_coeffs: Stop encoding when we have generated this many
           coefficients. Use a negative value to encode until min_coeff is
           reached.
-        noise: Coefficients are chosen based on their responses to the signal,
-          plus white noise with this standard deviation. Use 0 to get the
-          traditional argmax behavior.
 
         This method generates a sequence of tuples of the form (index,
         coefficient, offset), where index refers to a codebook filter and
@@ -107,18 +104,12 @@ class Codebook(codebook.Codebook):
         for i, f in enumerate(self.filters):
             self._correlate(signal, f, scores[i, :width - shapes[i] + 1])
 
-        blur = noise * rng.randn(*scores.shape)
-
         amplitude = abs(signal).sum()
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
 
-            if noise > 0 and 0 == max_num_coeffs % 10:
-                blur = noise * rng.randn(*scores.shape)
-
             # find the largest coefficient, check that it's large enough.
-            index, offset = numpy.unravel_index(
-                (scores + blur).argmax(), shape)
+            index, offset = numpy.unravel_index(scores.argmax(), shape)
             end = offset + shapes[index]
             coeff = scores[index, offset]
             if coeff < min_coeff:

@@ -71,7 +71,7 @@ class Codebook(object):
         for f in self.filters:
             f /= numpy.linalg.norm(f)
 
-    def encode(self, signal, min_coeff=0., max_num_coeffs=-1, noise=0.):
+    def encode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Encode a signal as a sequence of index, coefficient pairs.
 
         signal: A numpy array containing a signal to encode. The values in the
@@ -80,23 +80,15 @@ class Codebook(object):
           this threshold.
         max_num_coeffs: Stop encoding when this many filters have been used in
           the encoding.
-        noise: Coefficients are chosen based on their responses to the signal,
-          plus white noise with this standard deviation. Use 0 to get the
-          traditional argmax behavior.
 
         Generates a sequence of (index, coefficient) tuples.
         '''
         scores = numpy.array([(signal * f).sum() for f in self.filters])
 
-        blur = noise * rng.randn(*scores.shape)
-
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
 
-            if noise > 0 and 0 == max_num_coeffs % 10:
-                blur = noise * rng.randn(*scores.shape)
-
-            index = (scores + blur).argmax()
+            index = scores.argmax()
             coeff = scores[index]
             if coeff < min_coeff:
                 logging.debug('halting: coefficient %d is %.2f < %.2f',
@@ -128,14 +120,11 @@ class Codebook(object):
         except TypeError:
             return numpy.zeros_like(self.filters[0])
 
-    def encode_frames(self, frames, min_coeff=0., noise=0.):
+    def encode_frames(self, frames, min_coeff=0.):
         '''Encode a sequence of frames.
 
         frames: A (possibly infinite) sequence of data frames to encode.
         min_coeff: Only fire for filters that exceed this threshold.
-        noise: Coefficients are chosen based on their responses to the signal,
-          plus white noise with this standard deviation. Use 0 to get the
-          traditional argmax behavior.
 
         Generates a sequence of ((index, coeff), ...) tuples at the same rate as
         the input frames. If a given input frame does not yield a filter
@@ -169,11 +158,9 @@ class Codebook(object):
             scores = numpy.array(
                 [(window[:len(f)] * f).sum() for f in self.filters])
 
-            blur = noise * rng.randn(*scores.shape)
-
             encoding = []
             while True:
-                index = (scores + blur).argmax()
+                index = scores.argmax()
                 coeff = scores[index]
                 if coeff < min_coeff:
                     logging.debug('halting: coefficient %d is %.2f < %.2f',
@@ -212,7 +199,7 @@ class Codebook(object):
 class Trainer(object):
     '''Train the codebook filters in a matching pursuit encoder.'''
 
-    def __init__(self, codebook, min_coeff=0., max_num_coeffs=-1, samples=1, noise=0.):
+    def __init__(self, codebook, min_coeff=0., max_num_coeffs=-1, samples=1):
         '''Initialize this trainer with some learning parameters.
 
         codebook: The matching pursuit codebook to train.
@@ -221,15 +208,11 @@ class Trainer(object):
         max_num_coeffs: Train by encoding signals using this many coefficients.
         samples: The number of encoding samples to draw when approximating the
           gradient.
-        noise: Coefficients are chosen based on their responses to the signal,
-          plus white noise with this standard deviation. Use 0 to get the
-          traditional argmax behavior.
         '''
         self.codebook = codebook
         self.min_coeff = min_coeff
         self.max_num_coeffs = max_num_coeffs
         self.samples = samples
-        self.noise = noise
 
     def calculate_gradient(self, signal):
         '''Calculate a gradient from a signal.
@@ -244,8 +227,7 @@ class Trainer(object):
         activity = numpy.zeros((len(grad), ), float)
         for _ in range(self.samples):
             s = signal.copy()
-            enc = self.codebook.encode(
-                s, self.min_coeff, self.max_num_coeffs, self.noise)
+            enc = self.codebook.encode(s, self.min_coeff, self.max_num_coeffs)
             for index, coeff, error in self._calculate_gradient(s, enc):
                 grad[index] += coeff * error
                 activity[index] += coeff
