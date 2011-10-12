@@ -21,6 +21,7 @@
 import numpy
 import logging
 import numpy.random as rng
+from itertools import izip as zip
 
 import codebook
 
@@ -49,7 +50,7 @@ class Codebook(codebook.Codebook):
         if codebook.have_correlate and channels == 3:
             self._correlate = codebook._correlate.correlate2d_from_rgb
 
-    def encode(self, signal, min_coeff=0., max_num_coeffs=-1, noise=0.):
+    def encode(self, signal, min_coeff=0., max_num_coeffs=-1):
         '''Generate a set of codebook coefficients for encoding a signal.
 
         signal: A signal to encode.
@@ -58,9 +59,6 @@ class Codebook(codebook.Codebook):
         max_num_coeffs: Stop encoding when we have generated this many
           coefficients. Use a negative value to encode until min_coeff is
           reached.
-        noise: Coefficients are chosen based on their responses to the signal,
-          plus white noise with this standard deviation. Use 0 to get the
-          traditional argmax behavior.
 
         This method generates a sequence of tuples of the form (index,
         coefficient, (x offset, y offset)), where index refers to a codebook
@@ -70,61 +68,58 @@ class Codebook(codebook.Codebook):
         See the SpatialTrainer class for an example of how to use these
         results to update the codebook filters.
         '''
-        width, height = signal.shape[:2]
-        shapes = [f.shape[:2] for f in self.filters]
+        signal_shape = numpy.array(signal.shape)
+        filter_shapes = numpy.array([f.shape for f in self.filters])
 
         # we cache the correlations between signal and codebook to avoid
         # redundant computation.
-        shape = (len(self.filters),
-                 width - min(w for w, _ in shapes) + 1,
-                 height - min(h for _, h in shapes) + 1)
-        scores = numpy.zeros(shape, float) - numpy.inf
+        shape = tuple(signal_shape - shapes.min(axis=0) + 1)
+        scores = numpy.zeros((len(self.filters), ) + shape, float) - numpy.inf
         for i, f in enumerate(self.filters):
-            w, h = shapes[i]
-            self._correlate(signal, f, scores[i, :width-w+1, :height-h+1])
-
-        blur = noise * rng.randn(*scores.shape)
+            target = (slice(0, x) for x in signal_shape - filter_shapes[i] + 1)
+            self._correlate(signal, f, scores[(i, ) + tuple(target)])
 
         amplitude = abs(signal).sum()
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
 
-            if noise > 0 and 0 == max_num_coeffs % 10:
-                blur = noise * rng.randn(*scores.shape)
-
             # find the largest coefficient, check that it's large enough.
-            index, x, y = numpy.unravel_index(
-                (scores + blur).argmax(), shape)
-            ex = x + shapes[index][0]
-            ey = y + shapes[index][1]
-            coeff = scores[index, x, y]
+            whence = numpy.unravel_index(scores.argmax(), scores.shape)
+            coeff = scores[whence]
             if coeff < min_coeff:
                 logging.debug('halting: coefficient %d is %.2f < %.2f',
                               -max_num_coeffs, coeff, min_coeff)
                 break
 
+            index, offset = whence[0], whence[1:]
+            region = tuple(
+                slice(o, o + s) for o, s in zip(offset, filter_shapes[index]))
+
             # check that using this filter does not increase signal amplitude by
             # more than 1 %.
-            a = amplitude - abs(signal[x:ex, y:ey]).sum()
-            signal[x:ex, y:ey] -= coeff * self.filters[index]
-            a += abs(signal[x:ex, y:ey]).sum()
-            #logging.debug('coefficient %.2f, filter %d, offset %s yields amplitude %.2f', coeff, index, (x, y), a)
+            a = amplitude - abs(signal[region]).sum()
+            signal[region] -= coeff * self.filters[index]
+            a += abs(signal[region]).sum()
+            #logging.debug('coefficient %.2f, filter %d, offset %r yields amplitude %.2f', coeff, index, offset, a)
             if a > 1.01 * amplitude:
                 logging.debug('halting: coefficient %.2f, filter %d, '
                               'offset %s yields amplitude %.2f > 1.01 * %.2f',
-                              coeff, index, (x, y), a, amplitude)
+                              coeff, index, offset, a, amplitude)
                 break
             amplitude = a
 
             # update the correlation cache for the changed part of signal.
             for i, f in enumerate(self.filters):
-                wx, wy = shapes[i][0] - 1, shapes[i][1] - 1
-                ox, oy = max(0, x - wx), max(0, y - wy)
-                px, py = min(ex, width - wx), min(ey, height - wy)
-                self._correlate(
-                    signal[ox:ex + wx, oy:ey + wy], f, scores[i, ox:px, oy:py])
+                o = max(0, offset - filter_shape[i] + 1)
+                p = min(offset + filter_shapes[i], signal_shape - filter_shapes[i] + 1)
+                source = tuple(slice(max(0, o - fs + 1), o + fs + fs - 1)
+                               for o, fs in zip(offset, filter_shape[i]))
+                target = tuple(
+                    slice(max(0, o - fs + 1), min(o + fs, ss - fs + 1))
+                    for o, fs, ss in zip(offset, shape, signal_shape))
+                self._correlate(signal[source], f, scores[(i, ) + target])
 
-            yield index, coeff, (x, y)
+            yield index, coeff, offset
 
         else:
             logging.debug(
@@ -140,10 +135,10 @@ class Codebook(codebook.Codebook):
         filters given in the encoding coefficients, at the appropriate offsets.
         '''
         signal = numpy.zeros(signal_shape, float)
-        for index, coeff, (x, y) in coefficients:
+        for index, coeff, offset in coefficients:
             f = self.filters[index]
-            w, h = f.shape[:2]
-            signal[x:x + w, y:y + h] += coeff * f
+            region = tuple(slice(o, o + s) for o, s in zip(offset, f.shape))
+            signal[region] += coeff * f
         return signal
 
 
@@ -152,9 +147,10 @@ class Trainer(codebook.Trainer):
 
     def _calculate_gradient(self, error, encoding):
         '''Calculate the gradient from one encoding of a signal.'''
-        for index, coeff, (x, y) in encoding:
-            w, h = self.codebook.filters[index].shape[:2]
-            yield index, coeff, error[x:x + w, y:y + h]
+        for index, coeff, offset in encoding:
+            f = self.codebook.filters[index]
+            region = tuple(slice(o, o + s) for o, s in zip(offset, f.shape))
+            yield index, coeff, error[region]
 
     def _resize(self, i, padding, shrink, grow):
         '''Resize codebook vector i using some energy heuristics.
