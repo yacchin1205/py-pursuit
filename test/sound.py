@@ -102,8 +102,8 @@ def evaluate(train, test, width, codebook=10):
     c = lmj.pursuit.Codebook(codebook, width)
     t = lmj.pursuit.Trainer(c, max_num_coeffs=1)
     for _ in range(4):
-        for w in random_windows(500, train, width):
-            t.learn(w, 0.3)
+        for w in random_windows(1000, train, width):
+            t.learn(w, 0.1)
         seq += 1
         plot('window')
         s = numpy.zeros_like(test)
@@ -115,12 +115,12 @@ def evaluate(train, test, width, codebook=10):
 
     # continuous
     seq = 0
-    c = lmj.pursuit.correlation.Codebook(codebook, width)
-    t = lmj.pursuit.correlation.Trainer(c, max_num_coeffs=500)
+    c = lmj.pursuit.CudaCodebook(codebook, width)
+    t = lmj.pursuit.CudaTrainer(c, max_num_coeffs=1000)
     for _ in range(4):
-        _, activity = t.learn(train, 0.3)
-        t.resize(0.1, 0.01, 0.001)
-        t.resample(activity, 0.1)
+        _, activity = t.learn(train, 0.1)
+        #t.resize(0.1, 0.01, 0.001)
+        #t.resample(activity, 0.1)
         seq += 1
         plot('full')
         s = t.reconstruct(test)
@@ -137,15 +137,11 @@ if __name__ == '__main__':
         level=logging.INFO,
         format='%(levelname).1s %(asctime)s %(message)s')
 
-    w = rng.randint(int(SAMPLE_RATE * 0.5), int(SAMPLE_RATE * 1.5))
-
     train = read_frames(os.path.join(os.path.dirname(__file__), 'lullaby.wav'))
-    a = rng.randint(0, len(train) - w)
-    train = train[a:a+w]
+    train = train[0 * SAMPLE_RATE:2 * SAMPLE_RATE]
 
     test = read_frames(os.path.join(os.path.dirname(__file__), 'lullaby.wav'))
-    a = rng.randint(0, len(test) - w)
-    test = test[a:a+w]
+    test = test[1 * SAMPLE_RATE:3 * SAMPLE_RATE]
 
     rms = '%.1f' % (1000 * numpy.linalg.norm(test) / numpy.sqrt(len(test)))
     print 'Matching Pursuit Test'
