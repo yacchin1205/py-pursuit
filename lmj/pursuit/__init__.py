@@ -42,5 +42,14 @@ included ; to use it, "import lmj.pursuit.cuda" and then use the Codebook class
 in that module.
 '''
 
+# Reference implementation of the greedy Mallat/Zhang algorithm.
 from codebook import Codebook, Trainer
-import correlation
+
+# Reference implementation of a matching pursuit based on correlating an input
+# signal with codebook filters.
+from correlation import Codebook as CorrelationCodebook
+from correlation import Trainer as CorrelationTrainer
+
+# Experimental translation of the correlation algorithm to run on CUDA.
+from cuda import Codebook as CudaCodebook
+from cuda import Trainer as CudaTrainer

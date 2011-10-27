@@ -92,22 +92,19 @@ class Codebook(codebook.Codebook):
         See the Trainer class for an example of how to use these results to
         update the codebook filters.
         '''
-        signal_shape = numpy.array(signal.shape)
-        filter_shapes = numpy.array([f.shape for f in self.filters])
+        filter_shape = numpy.array([f.shape for f in self.filters]).min(axis=0)
+        scores = numpy.zeros(
+            (len(self.filters), ) +
+            tuple(ss - fs + 1 for ss, fs in zip(signal.shape, filter_shape)),
+            float) - numpy.inf
 
-        # we cache the correlations between signal and codebook to avoid
-        # redundant computation.
-        shape = tuple(signal_shape - filter_shapes.min(axis=0) + 1)
-        scores = numpy.zeros((len(self.filters), ) + shape, float) - numpy.inf
         for i, f in enumerate(self.filters):
-            target = (slice(0, x) for x in signal_shape - filter_shapes[i] + 1)
+            target = (slice(0, ss - fs + 1) for ss, fs in zip(signal.shape, f.shape))
             self._correlate(signal, f, scores[(i, ) + tuple(target)])
 
-        amplitude = abs(signal).sum()
         while max_num_coeffs != 0:
             max_num_coeffs -= 1
 
-            # find the largest coefficient, check that it's large enough.
             whence = numpy.unravel_index(scores.argmax(), scores.shape)
             coeff = scores[whence]
             if coeff < min_coeff:
@@ -116,47 +113,42 @@ class Codebook(codebook.Codebook):
                 break
 
             index, offset = whence[0], whence[1:]
-            region = tuple(
-                slice(o, o + s) for o, s in zip(offset, filter_shapes[index]))
-
-            # check that using this filter does not increase signal amplitude by
-            # more than 1 %.
-            a = amplitude - abs(signal[region]).sum()
-            signal[region] -= coeff * self.filters[index]
-            a += abs(signal[region]).sum()
-            #logging.debug('coefficient %.2f, filter %d, offset %r yields amplitude %.2f', coeff, index, offset, a)
-            if a > 1.01 * amplitude:
-                logging.debug('halting: coefficient %.2f, filter %d, '
-                              'offset %s yields amplitude %.2f > 1.01 * %.2f',
-                              coeff, index, offset, a, amplitude)
-                break
-            amplitude = a
+            f = self.filters[index]
+            region = tuple(slice(o, o + fs) for o, fs in zip(offset, f.shape))
+            signal[region] -= coeff * f
 
             # update the correlation cache for the changed part of signal.
             #
             # we just changed the signal in the "affected region" from offset to
-            # offset + filter_shape[index]. so we need to update the scores for
-            # that region. to do that, we need that corresponding part of the
-            # signal, plus all the "fringe" areas that the filters will overlap
-            # during the correlation computation.
+            # offset + filters[index].shape. we need to update the correlation
+            # scores for just this region ; the remainder of the correlation
+            # scores have not changed because the signal outside the affected
+            # region has not changed.
             #
-            # so, we wrap up the offset, filter shape, and signal shape. for
-            # each dimension, we start both the scores and the signal region at
-            # offset - filter_shape + 1, clipped to 0. (in my code, the
-            # correlation always shares the same starting point, while the end
-            # absorbs all of the fringe.)
+            # to do the update, we need the affected region of the signal, plus
+            # all the "fringe" areas that the filters require for the
+            # correlation computation. this gets a little complicated because
+            # the filters might not all be the same shape.
             #
-            # we end the source region for the signal at (offset + filter_shape)
-            # + filter_shape - 1, basically the end of the affected region
-            # plus the overlap due to the filter, clipped to the signal_shape.
+            # so, for each filter, we wrap up the offset of the affected region,
+            # the filter shape, and the signal shape. we start both the scores
+            # and the signal region at offset - filter.shape + 1, clipped to 0.
+            # (in my code, the fringe in the correlations is always at the end
+            # of the correlated region.)
+            #
+            # we end the source region for the signal at (offset + filter.shape)
+            # + filter.shape - 1, basically the end of the affected region plus
+            # the fringe for the filter. this is clipped to signal.shape,
+            # although in theory the fringe should never exceed the signal
+            # shape.
             #
             # we end the target region for the scores at the end of the affected
-            # region (offset + filter_shape), clipped to the end of the valid
-            # signal region (signal_shape - filter_shape + 1).
+            # region (offset + filter.shape), clipped to the end of the valid
+            # signal region (signal.shape - filter.shape + 1).
             for i, f in enumerate(self.filters):
                 source = []
                 target = [i]
-                for o, fs, ss in zip(offset, filter_shapes[i], signal_shape):
+                for o, fs, ss in zip(offset, f.shape, signal.shape):
                     a = max(0, o - fs + 1)
                     source.append(slice(a, min(ss, o + fs + fs - 1)))
                     target.append(slice(a, min(o + fs, ss - fs + 1)))
