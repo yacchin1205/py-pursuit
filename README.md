@@ -20,9 +20,43 @@ After installation, you can use the package by importing lmj.pursuit.
 
 ## Testing
 
-The source distribution includes two primary tests: sound and image. The sound
-test uses an experimental implementation that runs on a [CUDA][]-enabled
-graphics device to encode sound waveforms. The image test encodes image pixels.
+The source distribution includes three tests: gaussian, sound and image. The
+gaussian test demonstrates using an overcomplete dictionary to encode points
+drawn from a mixture of gaussians. The image test encodes image pixels. The
+sound test uses an experimental implementation that runs on a [CUDA][]-enabled
+graphics device to encode sound waveforms.
+
+### Gaussians
+
+You'll need cairo and GTK on your machine to run this test :
+
+    pip install pygtk pycairo
+
+Then just run the test :
+
+    python test/clusters.py
+
+A window will pop up that shows a small number of gaussian centroids arranged
+around a central representation of a codebook of 2D basis vectors. Press the
+space bar to start training, and points will be sampled from the centroids and
+used to train the matching pursuit codebook. Eventually, vectors in the codebook
+should point towards the centroids.
+
+### Image
+
+You'll need to install [glumpy][] to run this test :
+
+    pip install glumpy
+
+The image test simply requires some image data to run :
+
+    python test/images.py /path/to/my/image*.jpg /path/to/another/image*.png
+
+You'll see a window appear on your desktop ; this window is divided into four
+quadrants. At the upper-left is an image to be encoded. On the upper-right is
+the reconstructed image. In the lower-left are the codebook filters being used
+to perform the encoding. In the lower-right are the "feature maps" that show
+where each codebook filter has been used to reconstruct the source image.
 
 [CUDA]: http://www.nvidia.com/object/cuda_home_new.html
 
@@ -31,7 +65,7 @@ graphics device to encode sound waveforms. The image test encodes image pixels.
 The sound test runs matching pursuit on your 64-bit graphics card. To get
 started, install py-cuda :
 
-    pip install PyCUDA
+    pip install pycuda
 
 Currently, this test requires that your graphics device support 64-bit floating
 point values. If your graphics device is limited to 32-bit floats, you can add
@@ -54,22 +88,6 @@ If you have matplotlib installed, you can also save plots of the codebook
 vectors during training by setting `GRAPHS = '/tmp/pursuit'` (or some other
 directory name) in `test/sound.py`. Graphing doubles the test runtime, but
 produces some pretty training artifacts.
-
-### Image
-
-You'll need to install [glumpy][] to run this test :
-
-    pip install glumpy
-
-The image test simply requires some image data to run :
-
-    python test/images.py /path/to/my/image.jpg /path/to/another/image.png
-
-You'll see a window appear on your desktop ; this window is divided into four
-quadrants. At the upper-left is an image to be encoded. On the upper-right is
-the reconstructed image. In the lower-left are the codebook filters being used
-to perform the encoding. In the lower-right are the "feature maps" that show
-where each codebook filter has been used to reconstruct the source image.
 
 [glumpy]: http://code.google.com/p/glumpy/
 
