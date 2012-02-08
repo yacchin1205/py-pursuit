@@ -20,21 +20,21 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import os
-import sys
-import numpy
-import glumpy
-import OpenGL
-import logging
-import optparse
-import PIL.Image
 import collections
+import glumpy
+import logging
+import numpy
 import numpy.random as rng
+import OpenGL
+import optparse
+import os
+import PIL.Image
+import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__), os.pardir))
 import lmj.pursuit
 
-FLAGS = optparse.OptionParser()
+FLAGS = optparse.OptionParser('test/images.py [options] FILE...')
 FLAGS.add_option('-c', '--min-coeff', type=float, default=5)
 FLAGS.add_option('-d', '--min-coeff-decay', type=float, default=0.9)
 FLAGS.add_option('-n', '--max-num-coeffs', type=int, default=-1)
@@ -77,16 +77,14 @@ WhiteBlack = glumpy.colormap.Colormap(
 
 
 class Simulator(object):
-    def __init__(self, opts, args):
+    def __init__(self, source_frame, target_frame, filter_frames, feature_frames, opts, args):
         self.opts = opts
-
-        self.min_coeff = opts.min_coeff
 
         self.frames_until_pause = -1
         self.frames = 0
         self.frames_saved = 0
 
-        self.errors = collections.deque(maxlen=10)
+        # load images.
 
         self.devset = []
         for _ in range(min(len(args) // 2, 10)):
@@ -95,46 +93,57 @@ class Simulator(object):
             args.remove(arg)
         self.images = [load_image(arg) for arg in args]
 
+        # set up a matching pursuit object to train.
+
         F = opts.filters
         S = opts.filter_size
-        self.codebook = lmj.pursuit.correlation.Codebook(F * F, (S, S))
-        self.trainer = lmj.pursuit.correlation.Trainer(self.codebook)
+        self.codebook = lmj.pursuit.CorrelationCodebook(F * F, (S, S))
+        self.trainer = lmj.pursuit.CorrelationTrainer(self.codebook)
         self.activity = numpy.zeros((F * F, ), float)
+
+        self.learner = self.learn_forever()
+        self.errors = collections.deque(maxlen=10)
+        self.min_coeff = opts.min_coeff
+
+        # set up glumpy image objects to display what's happening on the screen.
 
         w = max(x.shape[0] for x in self.images)
         h = max(x.shape[1] for x in self.images)
-
-        Grey = glumpy.colormap.Grey
-
-        self.source = numpy.zeros((w, h), 'f')
-        self.source_image = glumpy.Image(
-            self.source, vmin=-2, vmax=2, cmap=Grey)
-
-        self.reconst = numpy.zeros((w, h), 'f')
-        self.reconst_image = glumpy.Image(
-            self.reconst, vmin=-2, vmax=2, cmap=Grey)
-
         vs = sorted(numpy.concatenate([abs(f).flatten() for f in self.codebook.filters]))
         v = vs[int(0.9 * len(vs))]
-        self.filter_kwargs = dict(vmin=-v, vmax=v)
-        self.filters = numpy.zeros((F, F, S, S), 'f')
-        self.filter_images = [
-            [glumpy.Image(f, **self.filter_kwargs) for f in fs]
-            for fs in self.filters]
 
+        kws = dict(vmin=-2, vmax=2, colormap=glumpy.colormap.Grey)
+        self.source = numpy.zeros((w, h), 'f')
+        self.source_image = glumpy.image.Image(self.source, **kws)
+        self.source_frame = source_frame
+
+        self.target = numpy.zeros((w, h), 'f')
+        self.target_image = glumpy.image.Image(self.target, **kws)
+        self.target_frame = target_frame
+
+        kws = dict(vmin=0, vmax=25, colormap=glumpy.colormap.IceAndFire)
         self.features = numpy.zeros((F, F, w, h), 'f')
-        self.feature_images = [
-            [glumpy.Image(f, vmin=0, vmax=30) for f in fs]
-            for fs in self.features]
+        self.feature_images = [[glumpy.image.Image(f, **kws) for f in fs] for fs in self.features]
+        self.feature_frames = feature_frames
 
-        self._iterator = self.learn_forever()
+        kws['vmin'] = -v
+        kws['vmax'] = v
+        self.filters = numpy.zeros((F, F, S, S), 'f')
+        self.filter_images = [[glumpy.image.Image(f, **kws) for f in fs] for fs in self.filters]
+        self.filter_frames = filter_frames
 
-    def step(self):
-        return next(self._iterator)
+    def learn_forever(self):
+        while True:
+            self.refresh_filters()
+            for _ in self.learn():
+                yield
+            err = numpy.linalg.norm(self.source - self.target)
+            self.errors.append(err / numpy.sqrt(self.source.size))
+            logging.error('rmse %.2f', sum(self.errors) / max(1, len(self.errors)))
 
     def learn(self):
         self.source[:] = 0.
-        self.reconst[:] = 0.
+        self.target[:] = 0.
         self.features[:] = 0.
 
         pixels = self.images[rng.randint(len(self.images))].copy()
@@ -151,14 +160,14 @@ class Simulator(object):
             encoding.append((index, coeff, x, y))
             a, b = numpy.unravel_index(index, (opts.filters, opts.filters))
             w, h = self.codebook.filters[index].shape[:2]
-            self.features[a, b, x:x+w, y:y+h] += coeff
-            self.reconst[x:x+w, y:y+h] += coeff * self.codebook.filters[index]
+            self.features[a, b, x:x+w, y:y+h] += 10 * abs(rng.randn()) # coeff
+            self.target[x:x+w, y:y+h] += coeff * self.codebook.filters[index]
             grad[index] += coeff * pixels[x:x+w, y:y+h]
             activity[index] += coeff
             yield
             self.frames += 1
 
-        #error = self.source - self.reconst
+        #error = self.source - self.target
         #for index, coeff, x, y in encoding:
         #    w, h = self.codebook.filters[index].shape[:2]
         #    grad[index] += coeff * error[x:x+w, y:y+h]
@@ -175,58 +184,38 @@ class Simulator(object):
         self.min_coeff *= self.opts.min_coeff_decay
 
     def refresh_filters(self):
-        vs = sorted(numpy.concatenate([abs(f).flatten() for f in self.codebook.filters]))
-        v = vs[int(0.9 * len(vs))]
         w = max(f.shape[0] for f in self.codebook.filters)
         h = max(f.shape[1] for f in self.codebook.filters)
+        vs = sorted(numpy.concatenate([abs(f).flatten() for f in self.codebook.filters]))
+        v = vs[int(0.9 * len(vs))]
         if w > self.filters.shape[2] or h > self.filters.shape[3]:
             shape = list(self.filters.shape)
             shape[2] = shape[3] = max(w * 1.2, h * 1.2)
-            self.filter_kwargs['vmin'] = -v
-            self.filter_kwargs['vmax'] = v
+            kws = dict(vmin=-v, vmax=v)
             self.filters = numpy.zeros(shape, 'f')
-            self.filter_images = [
-                [glumpy.Image(f, **self.filter_kwargs) for f in fs]
-                for fs in self.filters]
+            self.filter_images = [[glumpy.Image(f, **kws) for f in fs] for fs in self.filters]
 
         self.filters[:] = 0.
-        for r in range(self.opts.filters):
-            for c in range(self.opts.filters):
+        for r in xrange(self.opts.filters):
+            for c in xrange(self.opts.filters):
                 f = self.codebook.filters[r * self.opts.filters + c]
                 x, y = f.shape[:2]
                 a = (self.filters.shape[2] - x) // 2
                 b = (self.filters.shape[3] - y) // 2
                 self.filters[r, c, a:a+x, b:b+y] = f
 
-    def learn_forever(self):
-        while True:
-            self.refresh_filters()
-            for _ in self.learn():
-                yield
-            self.errors.append(numpy.linalg.norm(self.source - self.reconst) /
-                               numpy.sqrt(self.source.size))
-            logging.error('rmse %.2f', sum(self.errors) / max(1, len(self.errors)))
+    def draw(self):
+        def render(i, f):
+            i.update()
+            f.draw(x=f.x, y=f.y)
+            i.draw(x=f.x, y=f.y, z=0, width=f.width, height=f.height)
 
-    def draw(self, W, H, p=4):
-        self.source_image.update()
-        self.reconst_image.update()
-        [[f.update() for f in fs] for fs in self.feature_images]
-        [[f.update() for f in fs] for fs in self.filter_images]
-
-        w = int(float(W - p) / (2 * self.opts.filters))
-        h = int(float(H - p) / (2 * self.opts.filters))
-        self.source_image.blit(
-            p, h * self.opts.filters + p, w * self.opts.filters - p, h * self.opts.filters - p)
-        self.reconst_image.blit(w * self.opts.filters + p,
-                                h * self.opts.filters + p,
-                                w * self.opts.filters - p,
-                                h * self.opts.filters - p)
-        for r in range(self.opts.filters):
-            fs = self.filter_images[r]
-            Fs = self.feature_images[r]
-            for c in range(self.opts.filters):
-                fs[c].blit(w * c + p, h * r + p, w - p, h - p)
-                Fs[c].blit(w * (c + self.opts.filters) + p, h * r + p, w - p, h - p)
+        render(self.source_image, self.source_frame)
+        render(self.target_image, self.target_frame)
+        for r in xrange(self.opts.filters):
+            for c in xrange(self.opts.filters):
+                render(self.filter_images[r][c], self.filter_frames[r][c])
+                render(self.feature_images[r][c], self.feature_frames[r][c])
 
 
 if __name__ == '__main__':
@@ -239,38 +228,50 @@ if __name__ == '__main__':
 
     opts, args = FLAGS.parse_args()
 
-    assert len(args) > 1, 'Usage: image.py FILE...'
+    if not args:
+        FLAGS.error('No images specified!')
 
-    win = glumpy.Window(800, 800)
-    sim = Simulator(opts, args)
+    def add(r, c, size=(1, 1), spacing=0.025):
+        f = fig.add_figure(cols=N, rows=N, position=(r, c), size=size)
+        return f.add_frame(spacing=spacing)
 
-    @win.event
+    n = opts.filters
+    N = 2 * n
+    fig = glumpy.figure(size=(800, 800))
+    sim = Simulator(
+        add(0, n, size=(n, n), spacing=0.025 / n),
+        add(n, n, size=(n, n), spacing=0.025 / n),
+        [[add(r, c) for c in xrange(n)] for r in xrange(n)],
+        [[add(n + r, c) for c in xrange(n)] for r in xrange(n)],
+        opts, args)
+
+    @fig.event
     def on_draw():
-        win.clear()
-        sim.draw(*win.get_size())
+        fig.clear()
+        sim.draw()
 
-    @win.event
+    @fig.event
     def on_idle(dt):
-        win.draw()
         if sim.frames_until_pause != 0:
             sim.frames_until_pause -= 1
             try:
-                sim.step()
+                sim.learner.next()
             except:
                 logging.exception('error while training !')
                 sys.exit()
             if opts.save_frames and 0 == sim.frames % opts.save_frames:
-                save_frame(sim.frames_saved, *win.get_size())
+                save_frame(sim.frames_saved, fig.width, fig.height)
                 sim.frames_saved += 1
+        fig.redraw()
 
-    @win.event
+    @fig.event
     def on_key_press(key, modifiers):
-        if key == glumpy.key.ESCAPE:
+        if key == glumpy.window.key.ESCAPE:
             sys.exit()
-        if key == glumpy.key.SPACE:
+        if key == glumpy.window.key.SPACE:
             sim.frames_until_pause = sim.frames_until_pause == 0 and -1 or 0
-        if key == glumpy.key.ENTER:
+        if key == glumpy.window.key.ENTER:
             if sim.frames_until_pause >= 0:
                 sim.frames_until_pause = 1
 
-    win.mainloop()
+    glumpy.show()
