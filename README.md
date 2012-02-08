@@ -45,10 +45,10 @@ test with :
 
 The general takeaway is that signal reproduction tends to improve with more
 training (successive numbers within a group), with more codebook filters (first
-column), and by using the multiple-frame (temporal) encoder instead of the
+column), and by using the multiple-frame (convolution) encoder instead of the
 single-frame (standard) encoder. Interestingly, the standard encoder tends to do
-worse with larger filters (second column), while the temporal encoder tends to
-do worse with smaller filters.
+worse with larger filters (second column), while the convolution encoder tends
+to do worse with smaller filters.
 
 If you have matplotlib installed, you can also save plots of the codebook
 vectors during training by setting `GRAPHS = '/tmp/pursuit'` (or some other
