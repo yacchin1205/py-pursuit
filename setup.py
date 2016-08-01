@@ -1,5 +1,6 @@
 import os
 import setuptools
+import numpy as np
 
 setuptools.setup(
     name='lmj.pursuit',
@@ -17,6 +18,7 @@ setuptools.setup(
               'compressed-sensing '
               'machine-learning'),
     install_requires=['numpy'],
+    include_dirs=[np.get_include()],
     ext_modules=[setuptools.Extension('lmj.pursuit._correlate', sources=['lmj/pursuit/correlate.c'])],
     classifiers=[
         'Development Status :: 4 - Beta',
