@@ -49,7 +49,3 @@ from codebook import Codebook, Trainer
 # signal with codebook filters.
 from correlation import Codebook as CorrelationCodebook
 from correlation import Trainer as CorrelationTrainer
-
-# Experimental translation of the correlation algorithm to run on CUDA.
-from cuda import Codebook as CudaCodebook
-from cuda import Trainer as CudaTrainer
